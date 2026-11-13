@@ -1,0 +1,420 @@
+module prometheus::metrics_test;
+
+//! What a scrape receives, asserted against the bytes.
+//!
+//! **The rendering is the contract.** A registry whose numbers are right and
+//! whose text is off by a quote is a target Prometheus drops whole, so the
+//! main test compares `render()` with text written out by hand, byte for
+//! byte, and the rest check one rule each.
+//!
+//! The expected texts are backtick literals, which lose the line feed before
+//! their closing backtick, and every line of the format ends in one; each
+//! comparison puts that last line feed back as `"${expected}\n"`.
+
+import std::core::{List, Show, String, assert, assert_that};
+import prometheus::metrics::{MetricError, Registry, default_buckets};
+import prometheus::text::{escape_help, escape_label_value, label_set, number, valid_label_name, valid_metric_name};
+
+/// The error a declaration raised, rendered, or `"none"`.
+fn refusal(declare: () -> () raises MetricError) -> String {
+  let mut said = "none";
+  declare()! catch { why => said = Show::show(why) };
+  said
+}
+
+test "a small registry renders byte for byte" {
+  let registry = Registry::new();
+  let requests = registry.counter("http_requests_total", "Requests answered.", ["method", "code"])!;
+  requests.labels(["GET", "200"])!.inc();
+  requests.labels(["GET", "200"])!.inc();
+  requests.labels(["POST", "500"])!.add(3.0)!;
+  let flight = registry.gauge("in_flight", "Requests being answered.", List::Nil)!;
+  flight.set(2.0)!;
+  let seconds = registry.histogram("latency_seconds", "Time to answer.", ["route"], [0.1, 1.0])!;
+  let orders = seconds.labels(["/orders"])!;
+  orders.observe(0.05);
+  orders.observe(0.1);
+  orders.observe(0.5);
+  orders.observe(7.0);
+  let expected = `# HELP http_requests_total Requests answered.
+# TYPE http_requests_total counter
+http_requests_total{method="GET",code="200"} 2
+http_requests_total{method="POST",code="500"} 3
+# HELP in_flight Requests being answered.
+# TYPE in_flight gauge
+in_flight 2
+# HELP latency_seconds Time to answer.
+# TYPE latency_seconds histogram
+latency_seconds_bucket{route="/orders",le="0.1"} 2
+latency_seconds_bucket{route="/orders",le="1"} 3
+latency_seconds_bucket{route="/orders",le="+Inf"} 4
+latency_seconds_sum{route="/orders"} 7.65
+latency_seconds_count{route="/orders"} 4
+`;
+  let got = registry.render();
+  assert_that(got == "${expected}\n", got);
+}
+
+test "an empty registry renders nothing" {
+  assert(Registry::new().render() == "");
+}
+
+test "a counter counts, and refuses to go down" {
+  let registry = Registry::new();
+  let hits = registry.counter("hits_total", "Hits.", List::Nil)!;
+  hits.inc()!;
+  hits.add(2.5)!;
+  assert(refusal(fn () => hits.add(-1.0)!) == "a counter only goes up, and was asked to add -1");
+  let zero = 0.0;
+  // `NaN` is not below zero, and a counter that holds it never recovers.
+  let nan = refusal(fn () => hits.add(zero / zero)!);
+  assert_that(nan == "a counter only goes up, and was asked to add NaN", nan);
+  assert(hits.labels(List::Nil)!.get() == 3.5);
+  assert(registry.render() == "# HELP hits_total Hits.\n# TYPE hits_total counter\nhits_total 3.5\n");
+}
+
+test "a counter with no labels exports zero before anything happens" {
+  let registry = Registry::new();
+  let _ = registry.counter("starts_total", "", List::Nil)!;
+  assert(registry.render() == "# TYPE starts_total counter\nstarts_total 0\n");
+}
+
+test "a gauge with no labels goes both ways too" {
+  let registry = Registry::new();
+  let open = registry.gauge("open_connections", "", List::Nil)!;
+  open.inc()!;
+  open.inc()!;
+  open.dec()!;
+  open.add(0.5)!;
+  open.set(4.0)!;
+  open.dec()!;
+  assert(registry.render() == "# TYPE open_connections gauge\nopen_connections 3\n");
+}
+
+test "a gauge goes both ways" {
+  let registry = Registry::new();
+  let depth = registry.gauge("queue_depth", "Jobs waiting.", ["queue"])!;
+  let mail = depth.labels(["mail"])!;
+  mail.inc();
+  mail.inc();
+  mail.dec();
+  mail.add(-4.5);
+  assert(mail.get() == -3.5);
+  mail.set(10.0);
+  assert(mail.get() == 10.0);
+  assert(registry.render() == "# HELP queue_depth Jobs waiting.\n# TYPE queue_depth gauge\nqueue_depth{queue=\"mail\"} 10\n");
+}
+
+test "a histogram's buckets are cumulative and end in +Inf" {
+  let registry = Registry::new();
+  let sizes = registry.histogram("size_bytes", "", List::Nil, [10.0, 100.0, 1000.0])!;
+  // On a bound counts in that bucket: `le` is less-or-equal.
+  sizes.observe(10.0)!;
+  sizes.observe(11.0)!;
+  sizes.observe(100.0)!;
+  sizes.observe(5000.0)!;
+  sizes.observe(5000.0)!;
+  let expected = `# TYPE size_bytes histogram
+size_bytes_bucket{le="10"} 1
+size_bytes_bucket{le="100"} 3
+size_bytes_bucket{le="1000"} 3
+size_bytes_bucket{le="+Inf"} 5
+size_bytes_sum 10121
+size_bytes_count 5
+`;
+  let got = registry.render();
+  assert_that(got == "${expected}\n", got);
+}
+
+test "a histogram with no buckets given still has +Inf" {
+  let registry = Registry::new();
+  let waits = registry.histogram("wait_seconds", "", List::Nil, List::Nil)!;
+  waits.observe(3.0)!;
+  assert(registry.render() == "# TYPE wait_seconds histogram\nwait_seconds_bucket{le=\"+Inf\"} 1\nwait_seconds_sum 3\nwait_seconds_count 1\n");
+}
+
+test "the default buckets are Prometheus' own" {
+  let registry = Registry::new();
+  let _ = registry.histogram("d_seconds", "", List::Nil, default_buckets())!;
+  let expected = `# TYPE d_seconds histogram
+d_seconds_bucket{le="0.005"} 0
+d_seconds_bucket{le="0.01"} 0
+d_seconds_bucket{le="0.025"} 0
+d_seconds_bucket{le="0.05"} 0
+d_seconds_bucket{le="0.1"} 0
+d_seconds_bucket{le="0.25"} 0
+d_seconds_bucket{le="0.5"} 0
+d_seconds_bucket{le="1"} 0
+d_seconds_bucket{le="2.5"} 0
+d_seconds_bucket{le="5"} 0
+d_seconds_bucket{le="10"} 0
+d_seconds_bucket{le="+Inf"} 0
+d_seconds_sum 0
+d_seconds_count 0
+`;
+  let got = registry.render();
+  assert_that(got == "${expected}\n", got);
+}
+
+test "a trailing +Inf bound is the bucket every histogram has" {
+  let registry = Registry::new();
+  let zero = 0.0;
+  let h = registry.histogram("t_seconds", "", List::Nil, [1.0, 1.0 / zero])!;
+  h.observe(2.0)!;
+  assert(registry.render() == "# TYPE t_seconds histogram\nt_seconds_bucket{le=\"1\"} 0\nt_seconds_bucket{le=\"+Inf\"} 1\nt_seconds_sum 2\nt_seconds_count 1\n");
+}
+
+test "buckets out of order are refused" {
+  let registry = Registry::new();
+  let said = refusal(fn () => { let _ = registry.histogram("b_seconds", "", List::Nil, [1.0, 0.5])!; });
+  assert_that(said == "the buckets are refused: 0.5 does not come after 1", said);
+  let twice = refusal(fn () => { let _ = registry.histogram("c_seconds", "", List::Nil, [1.0, 1.0])!; });
+  assert_that(twice == "the buckets are refused: 1 does not come after 1", twice);
+  let zero = 0.0;
+  let nan = refusal(fn () => { let _ = registry.histogram("n_seconds", "", List::Nil, [zero / zero])!; });
+  assert_that(nan == "the buckets are refused: a bound is NaN", nan);
+}
+
+test "label values are escaped" {
+  assert(escape_label_value("plain") == "plain");
+  assert(escape_label_value("a\"b") == "a\\\"b");
+  assert(escape_label_value("a\\b") == "a\\\\b");
+  assert(escape_label_value("a\nb") == "a\\nb");
+  // The backslash a quote's escape adds is not escaped again.
+  assert(escape_label_value("\\\"") == "\\\\\\\"");
+  let registry = Registry::new();
+  let paths = registry.counter("paths_total", "", ["path"])!;
+  paths.labels(["C:\\dir \"x\"\nnext"])!.inc();
+  let got = registry.render();
+  assert_that(got == "# TYPE paths_total counter\npaths_total{path=\"C:\\\\dir \\\"x\\\"\\nnext\"} 1\n", got);
+}
+
+test "help text is escaped, and a quote in it is left alone" {
+  assert(escape_help("say \"hi\"\\ok\nmore") == "say \"hi\"\\\\ok\\nmore");
+  let registry = Registry::new();
+  let _ = registry.gauge("g", "line one\nline two", List::Nil)!;
+  assert(registry.render() == "# HELP g line one\\nline two\n# TYPE g gauge\ng 0\n");
+}
+
+test "a wrong number of label values is refused" {
+  let registry = Registry::new();
+  let requests = registry.counter("r_total", "", ["method", "code"])!;
+  let said = refusal(fn () => requests.labels(["GET"])!.inc());
+  assert_that(said == "the metric has 2 labels and was given 1 values", said);
+  let more = refusal(fn () => requests.labels(["GET", "200", "x"])!.inc());
+  assert_that(more == "the metric has 2 labels and was given 3 values", more);
+  let none = refusal(fn () => requests.inc()!);
+  assert_that(none == "the metric has 2 labels and was given 0 values", none);
+  let g = registry.gauge("g", "", ["a"])!;
+  assert(refusal(fn () => g.labels(List::Nil)!.inc()) == "the metric has 1 labels and was given 0 values");
+  let h = registry.histogram("h", "", List::Nil, [1.0])!;
+  assert(refusal(fn () => h.labels(["x"])!.observe(1.0)) == "the metric has 0 labels and was given 1 values");
+  // Nothing was made for the refused calls.
+  assert(registry.render() == "# TYPE g gauge\n# TYPE h histogram\nh_bucket{le=\"1\"} 0\nh_bucket{le=\"+Inf\"} 0\nh_sum 0\nh_count 0\n# TYPE r_total counter\n");
+}
+
+test "metric names are validated" {
+  assert(valid_metric_name("http_requests_total"));
+  assert(valid_metric_name("_x"));
+  assert(valid_metric_name("job:rate5m"));
+  assert(valid_metric_name("a1"));
+  assert(!valid_metric_name(""));
+  assert(!valid_metric_name("1a"));
+  assert(!valid_metric_name("a-b"));
+  assert(!valid_metric_name("a b"));
+  assert(!valid_metric_name("é"));
+  let registry = Registry::new();
+  let said = refusal(fn () => { let _ = registry.counter("http-requests", "", List::Nil)!; });
+  assert_that(said == "`http-requests` is not a metric name: it must match [a-zA-Z_:][a-zA-Z0-9_:]*", said);
+  assert(registry.render() == "");
+}
+
+test "label names are validated" {
+  assert(valid_label_name("method"));
+  assert(valid_label_name("_m2"));
+  assert(!valid_label_name("a:b"));
+  assert(!valid_label_name("2a"));
+  assert(!valid_label_name(""));
+  let registry = Registry::new();
+  let bad = "`a:b` is not a label name: it must match [a-zA-Z_][a-zA-Z0-9_]*, not begin with __, and not be `le` on a histogram";
+  assert(refusal(fn () => { let _ = registry.counter("c", "", ["a:b"])!; }) == bad);
+  let reserved = refusal(fn () => { let _ = registry.gauge("g", "", ["__name__"])!; });
+  assert_that(String::starts_with(reserved, "`__name__` is not a label name"), reserved);
+  let le = refusal(fn () => { let _ = registry.histogram("h", "", ["le"], [1.0])!; });
+  assert_that(String::starts_with(le, "`le` is not a label name"), le);
+  // `le` is an ordinary label everywhere but a histogram.
+  let _ = registry.gauge("fine", "", ["le"])!;
+  let twice = refusal(fn () => { let _ = registry.counter("d", "", ["a", "b", "a"])!; });
+  assert_that(twice == "the label `a` is declared twice", twice);
+}
+
+test "a name is registered once" {
+  let registry = Registry::new();
+  let _ = registry.counter("jobs_total", "", List::Nil)!;
+  let said = refusal(fn () => { let _ = registry.gauge("jobs_total", "", List::Nil)!; });
+  assert_that(said == "a metric named `jobs_total` is already registered", said);
+  assert(registry.render() == "# TYPE jobs_total counter\njobs_total 0\n");
+}
+
+/// What `second` raised when registered after `first` in a fresh registry,
+/// and what the registry then renders.
+fn collision(first: (Registry) -> () raises MetricError, second: (Registry) -> () raises MetricError) -> String {
+  let registry = Registry::new();
+  first(registry)! catch { why => return "first refused: ${Show::show(why)}" };
+  let said = refusal(fn () => second(registry)!);
+  "${said} | ${registry.render()}"
+}
+
+fn histogram_named(name: String) -> (Registry) -> () raises MetricError {
+  fn registry => { let _ = registry.histogram(name, "", List::Nil, [1.0])!; }
+}
+
+fn gauge_named(name: String) -> (Registry) -> () raises MetricError {
+  fn registry => { let _ = registry.gauge(name, "", List::Nil)!; }
+}
+
+fn counter_named(name: String) -> (Registry) -> () raises MetricError {
+  fn registry => { let _ = registry.counter(name, "", List::Nil)!; }
+}
+
+/// **A histogram writes three more series names than its own.** A gauge
+/// named `lat_count` beside a histogram `lat` puts two `lat_count` samples in
+/// one scrape; Prometheus' Go parser refuses the whole scrape, and its
+/// scrape loop drops one of the two as a duplicate, so one metric is silently
+/// wrong on every scrape.
+test "a histogram's _bucket, _sum and _count collide with other metrics, either order" {
+  let after = collision(histogram_named("lat"), gauge_named("lat_count"));
+  assert_that(String::starts_with(after, "`lat_count` collides with the histogram `lat`: both would write `lat_count` |"), after);
+  let before = collision(gauge_named("lat_count"), histogram_named("lat"));
+  assert_that(String::starts_with(before, "`lat` collides with the gauge `lat_count`: both would write `lat_count` |"), before);
+  let sum = collision(histogram_named("lat"), counter_named("lat_sum"));
+  assert_that(String::starts_with(sum, "`lat_sum` collides with the histogram `lat`: both would write `lat_sum` |"), sum);
+  let sum_first = collision(counter_named("lat_sum"), histogram_named("lat"));
+  assert_that(String::starts_with(sum_first, "`lat` collides with the counter `lat_sum`: both would write `lat_sum` |"), sum_first);
+  let bucket = collision(histogram_named("lat"), gauge_named("lat_bucket"));
+  assert_that(String::starts_with(bucket, "`lat_bucket` collides with the histogram `lat`: both would write `lat_bucket` |"), bucket);
+  let bucket_first = collision(gauge_named("lat_bucket"), histogram_named("lat"));
+  assert_that(String::starts_with(bucket_first, "`lat` collides with the gauge `lat_bucket`: both would write `lat_bucket` |"), bucket_first);
+  // Two histograms: `lat_count`'s own series and `lat`'s `_count`.
+  let two = collision(histogram_named("lat"), histogram_named("lat_count"));
+  assert_that(String::starts_with(two, "`lat_count` collides with the histogram `lat`: both would write `lat_count` |"), two);
+  // Nothing was registered by a refused declaration.
+  assert_that(String::ends_with(after, "| # TYPE lat histogram\nlat_bucket{le=\"1\"} 0\nlat_bucket{le=\"+Inf\"} 0\nlat_sum 0\nlat_count 0\n"), after);
+  assert_that(String::ends_with(before, "| # TYPE lat_count gauge\nlat_count 0\n"), before);
+}
+
+/// **A counter is one family with or without `_total`.** OpenMetrics and
+/// Python's parser name a counter's family without the suffix, so `jobs`
+/// and `jobs_total` fold into one family with two samples named alike.
+test "a counter collides with its name with or without _total, either order" {
+  let plain_first = collision(counter_named("jobs"), counter_named("jobs_total"));
+  assert_that(String::starts_with(plain_first, "`jobs_total` collides with the counter `jobs`: both would write `jobs_total` |"), plain_first);
+  let total_first = collision(counter_named("jobs_total"), counter_named("jobs"));
+  assert_that(String::starts_with(total_first, "`jobs` collides with the counter `jobs_total`: both would write `jobs` |"), total_first);
+  let gauge_total = collision(gauge_named("jobs_total"), counter_named("jobs"));
+  assert_that(String::starts_with(gauge_total, "`jobs` collides with the gauge `jobs_total`: both would write `jobs_total` |"), gauge_total);
+  let counter_then_gauge = collision(counter_named("jobs"), gauge_named("jobs_total"));
+  assert_that(String::starts_with(counter_then_gauge, "`jobs_total` collides with the counter `jobs`: both would write `jobs_total` |"), counter_then_gauge);
+  let gauge_plain = collision(gauge_named("jobs"), counter_named("jobs_total"));
+  assert_that(String::starts_with(gauge_plain, "`jobs_total` collides with the gauge `jobs`: both would write `jobs` |"), gauge_plain);
+  let counter_then_plain = collision(counter_named("jobs_total"), gauge_named("jobs"));
+  assert_that(String::starts_with(counter_then_plain, "`jobs` collides with the counter `jobs_total`: both would write `jobs` |"), counter_then_plain);
+  // A counter whose name without `_total` is a histogram's `_count`.
+  let deep = collision(histogram_named("lat"), counter_named("lat_count_total"));
+  assert_that(String::starts_with(deep, "`lat_count_total` collides with the histogram `lat`: both would write `lat_count` |"), deep);
+}
+
+/// Names that only look alike are left alone: a gauge's name reserves
+/// nothing else, and `_total` reserves only for a counter.
+test "names that do not collide are accepted" {
+  let registry = Registry::new();
+  let _ = registry.gauge("queue", "", List::Nil)!;
+  let _ = registry.gauge("queue_total", "", List::Nil)!;
+  let _ = registry.gauge("queue_count", "", List::Nil)!;
+  let _ = registry.histogram("lat", "", List::Nil, [1.0])!;
+  let _ = registry.gauge("lat_counts", "", List::Nil)!;
+  let _ = registry.gauge("lat_total", "", List::Nil)!;
+  let _ = registry.counter("jobs_totals", "", List::Nil)!;
+  let _ = registry.counter("jobs", "", List::Nil)!;
+  assert(String::contains(registry.render(), "# TYPE jobs counter\njobs 0\n"));
+}
+
+test "series render in label-value order, metrics in name order" {
+  let registry = Registry::new();
+  let b = registry.counter("b_total", "", ["k"])!;
+  let a = registry.counter("a_total", "", ["k"])!;
+  b.labels(["z"])!.inc();
+  b.labels(["m"])!.inc();
+  a.labels(["y"])!.inc();
+  b.labels(["a"])!.inc();
+  let got = registry.render();
+  let expected = "# TYPE a_total counter\na_total{k=\"y\"} 1\n# TYPE b_total counter\nb_total{k=\"a\"} 1\nb_total{k=\"m\"} 1\nb_total{k=\"z\"} 1\n";
+  assert_that(got == expected, got);
+}
+
+test "numbers are written as Prometheus reads them" {
+  let zero = 0.0;
+  let infinity = 1.0 / zero;
+  assert(number(1.0) == "1");
+  assert(number(0.25) == "0.25");
+  assert(number(-2.5) == "-2.5");
+  assert(number(infinity) == "+Inf");
+  assert(number(zero - infinity) == "-Inf");
+  assert(number(infinity - infinity) == "NaN");
+  // Past what `Float::to_string` can write in its 32 bytes: the shortest
+  // digits that read back as the same double, with an exponent.
+  assert_that(number(1.0e300) == "1e+300", number(1.0e300));
+  assert_that(number(-1.0e300) == "-1e+300", number(-1.0e300));
+  assert_that(number(1.7976931348623157e308) == "1.7976931348623157e+308", number(1.7976931348623157e308));
+  assert_that(number(1.0e-300) == "1e-300", number(1.0e-300));
+  assert_that(number(5.0e-324) == "5e-324", number(5.0e-324));
+  assert_that(number(1.2345678901234567e-20) == "1.2345678901234567e-20", number(1.2345678901234567e-20));
+  // The literal names the double whose shortest digits end in 8, as
+  // Python's `repr` writes it.
+  assert_that(number(1.2345678901234567e-15) == "1.2345678901234568e-15", number(1.2345678901234567e-15));
+  assert_that(number(2.2250738585072014e-308) == "2.2250738585072014e-308", number(2.2250738585072014e-308));
+  assert_that(number(1.2345678901234567e32) == "1.2345678901234567e+32", number(1.2345678901234567e32));
+  // Powers of two: the gap below one is half the gap above, so the digits
+  // that read back may be the farther of the two roundings, and a shorter
+  // form on the wide side would read back as a neighbor.
+  assert_that(number(two_to(-813)) == "1.8306845872749401e-245", number(two_to(-813)));
+  assert_that(number(two_to(-366)) == "6.653062250012736e-111", number(two_to(-366)));
+  // `5^23 / 2 * 2^54`: its shortest digits land exactly on the halfway point
+  // to its upper neighbor, and a double whose mantissa is even owns that
+  // point, as round-half-to-even reads it back.
+  assert_that(number(5960464477539062.0 * two_to(54)) == "1.073741824e+32", number(5960464477539062.0 * two_to(54)));
+  // A power of two, whose lower neighbor is nearer than its upper one.
+  assert_that(number(9.5367431640625e-7 * 9.5367431640625e-7 * 9.5367431640625e-7 * 9.5367431640625e-7) == "8.271806125530277e-25", number(9.5367431640625e-7 * 9.5367431640625e-7 * 9.5367431640625e-7 * 9.5367431640625e-7));
+}
+
+/// Two to the `n`, exactly: doubling and halving a double lose nothing.
+fn two_to(n: Int) -> Float {
+  let mut x = 1.0;
+  let mut left = n;
+  while left > 0 { x = x * 2.0; left = left - 1; };
+  while left < 0 { x = x / 2.0; left = left + 1; };
+  x
+}
+
+/// **Two bounds, two buckets.** Written to thirty places, `1e-31` and
+/// `2e-31` were both `0.000000000000000000000000000000`: one series with two
+/// `_bucket` samples under the same labels, which Prometheus' scrape loop
+/// drops one of.
+test "tiny histogram bounds render as distinct buckets" {
+  let registry = Registry::new();
+  let tiny = registry.histogram("tiny_seconds", "", List::Nil, [1.0e-31, 2.0e-31])!;
+  tiny.observe(1.5e-31)!;
+  let got = registry.render();
+  let expected = `# TYPE tiny_seconds histogram
+tiny_seconds_bucket{le="1e-31"} 0
+tiny_seconds_bucket{le="2e-31"} 1
+tiny_seconds_bucket{le="+Inf"} 1
+tiny_seconds_sum 1.5e-31
+tiny_seconds_count 1`;
+  assert_that(got == "${expected}\n", got);
+}
+
+test "label sets pair names with values, and are absent when empty" {
+  assert(label_set(List::Nil, List::Nil) == "");
+  assert(label_set(["a", "b"], ["1", "x\"y"]) == "{a=\"1\",b=\"x\\\"y\"}");
+}

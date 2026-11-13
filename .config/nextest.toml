@@ -72,5 +72,6 @@ filter = '''
     test(/^http/) or test(/^tls/) or test(/^reference::/)
     or test(/^sockets::/) or test(/^postgres::/) or test(/^load::/)
     or test(/^traps_in_a_server::/)
+    or test(/^prometheus::/)
 '''
 test-group = 'networked'

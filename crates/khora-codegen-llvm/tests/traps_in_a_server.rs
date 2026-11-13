@@ -35,8 +35,9 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 ///
 /// The ports in use, so the next one is chosen by looking in one place:
 /// 18732 `http`, 18733 `http_layers`, 18734 and 18740 to 18742 here, 18736 and 18737
-/// `http_accept`, 18738 and 18739 `long_inputs`, 18847 `tls_cancel`, 18961
-/// and 18962 `net_cancel`, 18971 and 18972 `tls`, 47821 `reference`.
+/// `http_accept`, 18738 and 18739 `long_inputs`, 18743 and 18744
+/// `prometheus`, 18847 `tls_cancel`, 18961 and 18962 `net_cancel`, 18971 and
+/// 18972 `tls`, 47821 `reference`.
 const PORT: u16 = 18734;
 
 /// The server that opted out, on a port of its own so the two tests can run

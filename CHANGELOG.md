@@ -731,6 +731,24 @@ it will behave differently now.
   instructions checking whether the call trapped, and one jump inside
   `Decimal::add`). A `Router` request costs about 1.3% more, on both
   backends.
+- `packages/prometheus`, a metrics package beside `otlp`: `Counter`,
+  `Gauge` and `Histogram` with label names declared up front and values given
+  per series (`counter.labels(["GET", "200"])!.inc()`), a `Registry` whose
+  `render()` writes Prometheus' text exposition format 0.0.4, and `mount`,
+  which adds `GET /metrics` to a `std::net::http::Router` with the content
+  type `text/plain; version=0.0.4; charset=utf-8`. Names and label names are
+  checked against Prometheus' rules when a metric is declared, and a wrong
+  number of label values, a counter `add` below zero or of `NaN`, unordered
+  histogram buckets and two metrics that would write a series of the same
+  name (a histogram `lat` and a gauge `lat_count`; counters `jobs` and
+  `jobs_total`) raise `MetricError`. `mount` raises
+  `MountError::AlreadyMounted` on a router that already answers
+  `GET /metrics`. Values too long for `Float::to_string` are written with an
+  exponent and read back exactly. Every series is a
+  `Shared` cell, so changes from many fibers are never lost. The method is
+  `labels` rather than the `with` other clients use, since `with` is a
+  keyword. No summaries, OpenMetrics, exemplars, push gateway or process
+  metrics. Documented at `/docs/packages/prometheus/`.
 
 - `[permissions] listen`: the ports a program may listen on. An entry is a
   port (`8080`), a range (`8000-8099`, starting at 1), `0` for a port the

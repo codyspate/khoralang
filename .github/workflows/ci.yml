@@ -315,6 +315,33 @@ jobs:
           sh scripts/build-musl-runtime.sh aarch64-unknown-linux-musl
           cargo nextest run -p khora-codegen-llvm --features llvm --test targets -E 'test(/musl/)'
 
+      # **Prometheus' parsers, so the scrape tests cannot skip here.**
+      # `packages/prometheus`'s two real-parser tests skip without these
+      # variables, and every other leg leaves them unset: one Linux runner is
+      # enough, since the text is the same bytes from any host. Two parsers,
+      # because the Python one accepts scrapes Prometheus refuses -- two
+      # `# TYPE` lines for one family, a series written twice -- and the Go
+      # ones (`expfmt`, and the server's own `textparse`) are what catch them.
+      # Both pinned: `prometheus_client==0.26.0` here, and the Go modules by
+      # the fixture's `go.mod` and `go.sum`. What it adds: one PyPI fetch of
+      # a 276 KB pure-Python package, a Go toolchain from the setup-go cache,
+      # and a first `go build` of the checker, which fetched its modules and
+      # built in about 30 s from an empty module cache on a developer machine.
+      - name: Go, for the Prometheus parser test
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: crates/khora-codegen-llvm/tests/fixtures/prometheus_go/go.mod
+          cache-dependency-path: crates/khora-codegen-llvm/tests/fixtures/prometheus_go/go.sum
+      - name: Prometheus' parsers, for the baseline's suite
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/prometheus-python"
+          "$RUNNER_TEMP/prometheus-python/bin/pip" install --quiet prometheus_client==0.26.0
+          echo "KHORA_PROMETHEUS_PYTHON=$RUNNER_TEMP/prometheus-python/bin/python" >> "$GITHUB_ENV"
+          echo "KHORA_PROMETHEUS_GO=$(command -v go)" >> "$GITHUB_ENV"
+
       # The whole baseline: the suite, clippy, the corpus check and formatter
       # over `std`, every reference application built, and twelve HTTP
       # conformance checks against a real `curl`. On Windows the script is

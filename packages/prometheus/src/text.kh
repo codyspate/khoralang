@@ -1,0 +1,299 @@
+module prometheus::text;
+
+//! The pieces of Prometheus' text exposition format that are easy to get
+//! subtly wrong: which names are legal, how a label value is escaped, and how
+//! a number is written.
+//!
+//! **Every function here fails closed toward the parser.** A scrape that
+//! cannot be parsed is not a partly wrong scrape: Prometheus drops the whole
+//! target for that interval, so one bad label value on one series blanks
+//! every metric the service exports. That is why names are refused when a
+//! metric is made, not when it is rendered, and why a value is escaped on the
+//! way out rather than trusted.
+
+import std::core::{Array, Char, List, Ordering, Pair, String, U8};
+
+/// Whether `name` matches `[a-zA-Z_:][a-zA-Z0-9_:]*`, the metric name rule.
+///
+/// Colons are legal and reserved by convention for recording rules; they are
+/// accepted here, since the parser accepts them, and it is the server
+/// operator's convention rather than this package's to enforce.
+pub fn valid_metric_name(name: String) -> Bool {
+  valid_identifier(name, colons: true)
+}
+
+/// Whether `name` matches `[a-zA-Z_][a-zA-Z0-9_]*`, the label name rule.
+///
+/// This is the shape alone. Names beginning `__` match it and are still
+/// reserved for Prometheus' own use; `reserved_label_name` says which.
+pub fn valid_label_name(name: String) -> Bool {
+  valid_identifier(name, colons: false)
+}
+
+/// Whether `name` begins with `__`, which Prometheus keeps for itself.
+///
+/// A target that exports `__name__` or `__address__` as a label collides with
+/// the labels the server attaches during the scrape, and the server's labels win.
+pub fn reserved_label_name(name: String) -> Bool { String::starts_with(name, "__") }
+
+fn valid_identifier(name: String, colons: Bool) -> Bool {
+  let length = String::byte_length(name);
+  let mut ok = length > 0;
+  let mut at = 0;
+  while ok && at < length {
+    let byte = U8::to_int(String::byte(name, at));
+    let letter = (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122);
+    let digit = byte >= 48 && byte <= 57;
+    let colon = colons && byte == 58;
+    ok = letter || byte == 95 || colon || (digit && at > 0);
+    at = at + 1;
+  };
+  ok
+}
+
+/// `value` as it goes between the quotes of a label: backslash, double quote
+/// and line feed escaped as `\\`, `\"` and `\n`.
+///
+/// **Backslash first.** Escaping it after the other two would double the
+/// backslashes they introduced, and `a"b` would arrive as `a\\"b`, a value
+/// that ends early and a line the parser refuses.
+pub fn escape_label_value(value: String) -> String {
+  String::replace(String::replace(String::replace(value, "\\", "\\\\"), "\"", "\\\""), "\n", "\\n")
+}
+
+/// `help` as it goes after `# HELP name`: backslash and line feed escaped.
+///
+/// A double quote is left alone, as the format says. A line feed left alone
+/// would end the comment and start a line the parser reads as a sample.
+pub fn escape_help(help: String) -> String {
+  String::replace(String::replace(help, "\\", "\\\\"), "\n", "\\n")
+}
+
+/// `value` as a sample value or a bucket bound: `+Inf`, `-Inf`, `NaN`, or the
+/// shortest decimal that reads back as the same double.
+///
+/// **Never `?`, and never a different number.** `Float::to_string` writes
+/// into thirty-two bytes and answers `?` for a double whose shortest form is
+/// longer than that, such as `1e300`, `5e-324` or `1.2345678901234567e-15`,
+/// and `?` is not a number a scraper can read. Those are written by
+/// `with_exponent`, with the same shortest digits and an exponent. Writing
+/// them to a fixed number of places instead read `1e-300` back as `0` and
+/// made the bounds `1e-31` and `2e-31` one bucket.
+pub fn number(value: Float) -> String {
+  let zero = 0.0;
+  let infinity = 1.0 / zero;
+  if value == infinity {
+    "+Inf"
+  } else if value == zero - infinity {
+    "-Inf"
+  } else if value == value {
+    let shortest = Float::to_string(value);
+    if shortest == "?" {
+      if value < zero { "-${with_exponent(zero - value)}" } else { with_exponent(value) }
+    } else {
+      shortest
+    }
+  } else {
+    "NaN"
+  }
+}
+
+/// A positive, finite `value` as the fewest significant digits that read
+/// back as it, with an exponent: `1e-300`, `1.2345678901234567e+32`.
+///
+/// **Exact, because the alternative is a wrong number.** Scaling by a power
+/// of ten and asking `Float::to_string` again rounds in binary at every
+/// step, so the digits would be those of a neighbor. This takes the double
+/// apart into an integer and a power of two, which is exact, and writes it
+/// and the two points halfway to its neighbors out in decimal with a
+/// multi-word integer. The shortest digits that land between those two
+/// points are the answer, and they are the ones Python's `repr` and Go's
+/// `strconv` write. Of several, the nearest to the value is taken.
+///
+/// What it costs: up to about 800 decimal digits, three times, which is
+/// microseconds. Only values `Float::to_string` cannot write come here, and
+/// a metric rarely holds one.
+fn with_exponent(value: Float) -> String {
+  let whole = split(value);
+  let m = whole.key;
+  let e = whole.value;
+  let exact = expanded(m, e);
+  let even = m % 2 == 0;
+  // The halfway points. The one below is nearer when `m` is the smallest
+  // mantissa of its binade, because the gap below a power of two is half
+  // the gap above it.
+  let narrow = m == 4503599627370496 && e > -1074;
+  let below = if narrow { expanded(4 * m - 1, e - 2) } else { expanded(2 * m - 1, e - 1) };
+  let above = expanded(2 * m + 1, e - 1);
+  let inside = fn (candidate: Decimal) => {
+    let low = compared(candidate, below);
+    let high = compared(candidate, above);
+    (low > 0 || (even && low == 0)) && (high < 0 || (even && high == 0))
+  };
+  let length = String::byte_length(exact.digits);
+  let mut found = exact;
+  let mut places = 1;
+  let mut going = places < length;
+  while going {
+    let nearest = rounded(exact, places);
+    if inside(nearest.key) {
+      found = nearest.key;
+      going = false;
+    } else if inside(nearest.value) {
+      found = nearest.value;
+      going = false;
+    } else {
+      places = places + 1;
+      going = places < length;
+    }
+  };
+  scientific(found)
+}
+
+/// A positive decimal: `0.<digits>` times ten to the `point`, with no
+/// leading or trailing zero in `digits`.
+type Decimal = { digits: String, point: Int };
+
+/// `value` as `m` times two to the `e`, exactly, with `m` below `2^53`.
+///
+/// Doubling and halving a double is exact while it stays finite, so the
+/// value is walked into `[2^52, 2^53)`, where every double is an integer;
+/// a subnormal is then given back the exponent it has, `-1074`, and the
+/// mantissa it has, which is smaller.
+fn split(value: Float) -> Pair<Int, Int> {
+  let top = 9007199254740992.0;
+  let bottom = 4503599627370496.0;
+  let mut x = value;
+  let mut e = 0;
+  while x >= top { x = x / 2.0; e = e + 1; };
+  while x < bottom { x = x * 2.0; e = e - 1; };
+  let mut m = Float::to_int(x);
+  while e < -1074 { m = m / 2; e = e + 1; };
+  { key: m, value: e }
+}
+
+/// `m` times two to the `e`, written out in decimal with every digit.
+///
+/// Two to a negative power is five to that power over ten to it, so the
+/// digits are those of `m * 5^-e` and only the point moves. The integer is
+/// held nine decimal digits to a word, least significant first, and
+/// multiplied by `2^30` or `5^13` a step at a time: either times a word is
+/// below `2^63`.
+fn expanded(m: Int, e: Int) -> Decimal {
+  let words: Array<Int> = Array::new(100, 0);
+  let base = 1000000000;
+  let mut used = 0;
+  let mut rest = m;
+  while rest > 0 {
+    Array::set(words, used, rest % base);
+    rest = rest / base;
+    used = used + 1;
+  };
+  let mut left = if e >= 0 { e } else { 0 - e };
+  while left > 0 {
+    let step = if e >= 0 { if left >= 30 { 30 } else { left } } else { if left >= 13 { 13 } else { left } };
+    let factor = if e >= 0 { Int::shl(1, step) } else { power(5, step) };
+    let mut carry = 0;
+    let mut at = 0;
+    while at < used {
+      let product = Array::get(words, at) * factor + carry;
+      Array::set(words, at, product % base);
+      carry = product / base;
+      at = at + 1;
+    };
+    while carry > 0 {
+      Array::set(words, used, carry % base);
+      carry = carry / base;
+      used = used + 1;
+    };
+    left = left - step;
+  };
+  let mut pieces: List<String> = List::Nil;
+  let mut at = 0;
+  while at < used - 1 {
+    pieces = List::Cons(String::pad_left(Int::to_string(Array::get(words, at)), 9, "0"), pieces);
+    at = at + 1;
+  };
+  pieces = List::Cons(Int::to_string(Array::get(words, used - 1)), pieces);
+  let digits = String::join(pieces, "");
+  let length = String::byte_length(digits);
+  { digits: without_trailing_zeros(digits), point: if e >= 0 { length } else { length + e } }
+}
+
+fn power(base: Int, exponent: Int) -> Int {
+  let mut out = 1;
+  let mut left = exponent;
+  while left > 0 { out = out * base; left = left - 1; };
+  out
+}
+
+fn without_trailing_zeros(digits: String) -> String {
+  let mut end = String::byte_length(digits);
+  while end > 1 && U8::to_int(String::byte(digits, end - 1)) == 48 { end = end - 1; };
+  String::slice(digits, 0, end)
+}
+
+/// Below zero, zero or above zero, as `a` is below, equal to or above `b`.
+fn compared(a: Decimal, b: Decimal) -> Int {
+  if a.point != b.point {
+    if a.point < b.point { -1 } else { 1 }
+  } else {
+    match a.digits.cmp(b.digits) {
+      Ordering::Less => -1,
+      Ordering::Equal => 0,
+      Ordering::Greater => 1,
+    }
+  }
+}
+
+/// `exact` to `places` significant digits: the nearest, ties to even, and
+/// the one on the other side of `exact`.
+///
+/// Both, because the halfway points are not always the same distance from
+/// the value: below a power of two the gap is half as wide, and there the
+/// nearer candidate can fall outside while the farther one is inside.
+fn rounded(exact: Decimal, places: Int) -> Pair<Decimal, Decimal> {
+  let digits = exact.digits;
+  let kept = String::slice(digits, 0, places);
+  let next = U8::to_int(String::byte(digits, places));
+  let more = String::byte_length(digits) > places + 1;
+  let last = U8::to_int(String::byte(kept, places - 1)) - 48;
+  let up = next > 53 || (next == 53 && (more || last % 2 == 1));
+  let down: Decimal = { digits: without_trailing_zeros(kept), point: exact.point };
+  let raised = incremented(kept, exact.point);
+  if up { { key: raised, value: down } } else { { key: down, value: raised } }
+}
+
+/// `digits` plus one in its last place.
+fn incremented(digits: String, point: Int) -> Decimal {
+  let length = String::byte_length(digits);
+  let mut at = length - 1;
+  while at >= 0 && U8::to_int(String::byte(digits, at)) == 57 { at = at - 1; };
+  if at < 0 {
+    { digits: "1", point: point + 1 }
+  } else {
+    let bumped = Char::to_string(Char::from_code(U8::to_int(String::byte(digits, at)) + 1));
+    { digits: "${String::slice(digits, 0, at)}${bumped}", point: point }
+  }
+}
+
+/// `d.ddde+N` or `d.ddde-N`, as Python's `repr` writes one.
+fn scientific(found: Decimal) -> String {
+  let digits = found.digits;
+  let first = String::slice(digits, 0, 1);
+  let length = String::byte_length(digits);
+  let mantissa = if length > 1 { "${first}.${String::slice(digits, 1, length)}" } else { first };
+  let exponent = found.point - 1;
+  if exponent < 0 { "${mantissa}e-${Int::to_string(0 - exponent)}" } else { "${mantissa}e+${Int::to_string(exponent)}" }
+}
+
+/// `{a="x",b="y"}` for `names` and `values` taken in pairs, or `""` when there
+/// are none.
+///
+/// The braces are left off rather than written empty: both parse, and a
+/// series with no labels is written without them by every client library, so
+/// a byte comparison against any of them agrees.
+pub fn label_set(names: List<String>, values: List<String>) -> String {
+  let pairs = List::map(List::zip(names, values), fn pair => "${pair.key}=\"${escape_label_value(pair.value)}\"");
+  if List::is_empty(pairs) { "" } else { "{${String::join(pairs, ",")}}" }
+}

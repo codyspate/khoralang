@@ -1,0 +1,10 @@
+[package]
+name = "prometheus"
+version.workspace = true
+# Offered for other people to depend on, like `otlp`: metrics are the other
+# half of observability, and `std` deliberately carries traces and logs only.
+publish = true
+
+# Nothing here declares an `extern fn` or builds a capability. The one route it
+# mounts is on a `Router` the caller made and serves, so the port, and the
+# permission to listen on it, are the caller's.

@@ -1,0 +1,74 @@
+module prometheus::serve;
+
+//! The scrape endpoint: a `GET /metrics` route on a router the caller owns.
+//!
+//! **No server of its own.** A second listener means a second port to open in
+//! every firewall and a second thing to keep running, and a service already
+//! has a router. So this mounts one route, and the service's own `listen`
+//! serves it, under the service's own `[permissions] listen` grant.
+
+import std::core::{List, SharedFn, Show};
+import std::net::http::{Method, Request, Response, Route, Router};
+import prometheus::metrics::{Registry};
+
+/// The content type of the text exposition format, version 0.0.4.
+///
+/// **The `version` parameter is what a scraper reads.** Without it a current
+/// Prometheus falls back by guessing, and may try to parse the body as
+/// OpenMetrics, which this is not.
+pub fn content_type() -> String { "text/plain; version=0.0.4; charset=utf-8" }
+
+/// Why `mount` refused a router.
+pub type MountError =
+  /// The router already has a route for exactly `GET /metrics`: an earlier
+  /// `mount`, or the service's own.
+  | AlreadyMounted;
+
+impl Show for MountError {
+  /// One sentence a person can act on.
+  fn show(self) -> String {
+    match self {
+      MountError::AlreadyMounted => "the router already answers GET /metrics; mount one registry, once, and mount it after every other route",
+    }
+  }
+}
+
+/// A handler that answers every request with `registry`'s metrics.
+///
+/// For a router that mounts it somewhere other than `/metrics`, or behind a
+/// check of its own. Nothing is refused here: where it is mounted, and what
+/// else answers that path, is the caller's to arrange.
+pub fn handler<'er>(registry: Registry) -> SharedFn<Request, Response, 'er> {
+  SharedFn::of(fn _request => Response::of(200, content_type(), registry.render()))
+}
+
+/// `router` with `GET /metrics` answering `registry`'s metrics.
+///
+/// ```khora
+/// Router::new()
+///   |> Router::get("/orders", SharedFn::of(orders))
+///   |> mount(registry)!
+///   |> Router::listen(8080)!
+/// ```
+///
+/// `HEAD /metrics` is answered too, by the router, with the same headers.
+///
+/// **Mount it last.** A router tries the route mounted last first, so a
+/// catch-all such as `GET /:page` mounted *after* this one answers
+/// `/metrics` itself, with its own body and content type, and the scrape
+/// endpoint is gone with nothing said at startup. Mounted after every other
+/// route, `/metrics` is matched first.
+///
+/// **Refused when the router already has a `GET /metrics`**, with
+/// `MountError::AlreadyMounted`. Mounted after one, this would replace it
+/// without a word: a service's own `/metrics` would vanish, and a second
+/// `mount` would serve only the second registry. Only that exact pattern is
+/// checked; a catch-all is not, since the router cannot say which paths a
+/// pattern was meant for. `POST /metrics` and other methods are left alone.
+pub fn mount<'er>(router: Router<'er>, registry: Registry) -> Router<'er> raises MountError {
+  let taken = List::any(router.routes, fn (route: Route<'er>) => route.pattern == "/metrics" && Method::same(route.method, Method::Get));
+  if taken {
+    raise MountError::AlreadyMounted
+  };
+  Router::get(router, "/metrics", handler(registry))
+}

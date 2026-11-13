@@ -1,0 +1,77 @@
+module prometheus::serve_test;
+
+//! Where `mount` puts `/metrics`, and what it refuses.
+
+import std::core::{List, Option, SharedFn, Show, String, assert, assert_that};
+import std::net::http::{Request, Response, Route, Router, matches};
+import prometheus::metrics::{Registry};
+import prometheus::serve::{MountError, content_type, mount};
+
+/// What the first route that matches `GET path` answers, as the router tries
+/// them: the last mounted first.
+fn answer<'er>(router: Router<'er>, path: String) -> String {
+  let mut said = "no route";
+  let mut going = true;
+  let mut rest = router.routes;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(route, tail) =>
+        match matches(route.pattern, path) {
+          Option::Some(_params) => {
+            let response = SharedFn::call(route.handler, Request::get(path)) catch { _ => Response::text(500, "failed") };
+            said = "${response.content_type}: ${response.body}";
+            going = false;
+          },
+          Option::None => rest = tail,
+        },
+    }
+  };
+  said
+}
+
+fn page(_request: Request) -> Response { Response::text(200, "page") }
+
+/// What `mount` raised on `router`, or `"none"`.
+fn refusal<'er>(router: Router<'er>, registry: Registry) -> String {
+  let mut said = "none";
+  let _ = mount(router, registry)! catch { why => { said = Show::show(why); router } };
+  said
+}
+
+test "mount answers GET /metrics with the registry and its content type" {
+  let registry = Registry::new();
+  let _ = registry.counter("up_total", "", List::Nil)!;
+  let router = Router::new() |> Router::get("/:page", SharedFn::of(page)) |> mount(registry)!;
+  let got = answer(router, "/metrics");
+  assert_that(got == "${content_type()}: # TYPE up_total counter\nup_total 0\n", got);
+  // A route mounted before `mount` still answers its other paths.
+  assert(answer(router, "/orders") == "text/plain: page");
+}
+
+/// **Refused rather than replaced.** The router tries the last route mounted
+/// first, so a second `mount` would serve only the second registry, and a
+/// `mount` after a service's own `GET /metrics` would hide it, both without
+/// a word.
+test "a second mount on one router is refused" {
+  let once = Router::new() |> mount(Registry::new())!;
+  let said = refusal(once, Registry::new());
+  assert_that(said == "the router already answers GET /metrics; mount one registry, once, and mount it after every other route", said);
+}
+
+test "a mount after the service's own GET /metrics is refused" {
+  let own = Router::new() |> Router::get("/metrics", SharedFn::of(page));
+  let said = refusal(own, Registry::new());
+  assert_that(String::starts_with(said, "the router already answers GET /metrics"), said);
+}
+
+/// `POST /metrics` and a catch-all are not `GET /metrics`, and are left to
+/// answer what they answered.
+test "mount leaves other methods and catch-alls mounted before it alone" {
+  let router = Router::new()
+    |> Router::post("/metrics", SharedFn::of(page))
+    |> Router::get("/:page", SharedFn::of(page));
+  assert(refusal(router, Registry::new()) == "none");
+  let mounted = router |> mount(Registry::new())!;
+  assert(answer(mounted, "/metrics") == "${content_type()}: ");
+}

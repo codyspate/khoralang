@@ -100,6 +100,7 @@ mod postgres;
 mod process_cancel;
 mod process;
 mod profiles;
+mod prometheus;
 mod random;
 mod raw_catch;
 mod raised;

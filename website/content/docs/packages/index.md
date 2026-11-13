@@ -50,8 +50,11 @@ whole mechanism, and a monorepo of packages works because `subdir` exists.
 - **`otlp`** — an exporter for the trace vocabulary in `std::trace`, over
   OTLP/HTTP JSON. **No page here yet** — read
   [`packages/otlp/README.md`](https://github.com/codyspate/khoralang/blob/main/packages/otlp/README.md).
+- **[`prometheus`](/docs/packages/prometheus/)** — counters, gauges and
+  histograms, served for Prometheus to scrape on a route of the service's own
+  router. Documented here.
 
-Each of the three is depended on the same way, with `git` and `subdir`; not
+Each of the four is depended on the same way, with `git` and `subdir`; not
 having a page here is a gap in this section rather than a difference in how the
 package is used.
 

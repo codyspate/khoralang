@@ -175,6 +175,10 @@ problem; metrics do not, and their hard part is aggregation and temporality,
 which is much closer to being a package's business. Shipping `Tracer` and
 `Logger` first and letting `Meter` wait for a real user is the smaller mistake.
 
+*Answered by a package.* `packages/prometheus` has counters, gauges and
+histograms and serves them in Prometheus' text format on a route of the
+service's own `Router`; `std` has no metrics.
+
 ## What this document does not decide
 
 Whether logging is a separate effect or a span event with a severity. Whether
