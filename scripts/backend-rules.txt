@@ -72,6 +72,7 @@
 `attempt` produces a `Result`, which has `Ok` and `Err`
 `attempt` takes a function to run
 `break` outside a loop
+`contain` takes a function to run
 `continue` outside a loop
 `timeout` takes a function to run
 `with_c_string` takes a body to lend the string to

@@ -184,7 +184,7 @@ when the change has something to report beyond the new state — the key it
 generated, say.
 
 **A cell is process-local.** It does not survive a restart and a second instance
-does not see it, and [a trap in a handler ends the process](#a-trap-in-a-handler-ends-the-server).
+does not see it, and a restart loses it.
 So this is for what a restart can rebuild — a cache, a counter, a connection
 registry — and anything else belongs in a database.
 
@@ -380,17 +380,48 @@ balancer, wait, then stop — is still what
 [Containers](/docs/deployment/containers/) recommends, because it is what stops
 *new* requests arriving.
 
-## A trap in a handler ends the server
+## A trap in a handler is that request's 500
 
-The router turns a typed failure into a 500 rather than a dropped connection.
-It cannot do that for a trap. A checked overflow, an index outside an array or
-a division by zero does not unwind, so it never reaches the wrapper, and the
-process exits with status 134 taking every in-flight connection with it.
+The router runs each request inside
+[`contain`](/docs/reference/traps/#containing-a-trap-with-contain). A checked
+overflow, an index outside an array or a division by zero in a handler
+answers `500 Internal Server Error`, and every other request -- the ones in
+flight beside it and the ones after it -- is answered as usual. The trap is
+printed to stderr with the fiber and `(contained; the fiber continues)`, so
+it is in the log for somebody to fix:
 
-The practical consequence is that request-shaped integers must be validated
-before they are used in arithmetic, which is what [Decoding
-input](/docs/cookbook/decoding-input/) is for, and that a service wants more
-than one process behind it. [Traps](/docs/reference/traps/#what-this-means-for-a-server)
+```
+khora: Int addition overflowed on fiber 12 (contained; the fiber continues)
+```
+
+The client is told nothing about what went wrong; the sentence can name an
+index or a value, which is not its business.
+
+A trap is still a bug, and three things keep it from becoming a quiet stream
+of 500s:
+
+- **The trap budget.** Once the process has contained 1,000 traps in 60
+  seconds, the next one ends it with status 134, where a supervisor sees it.
+  `KHORA_TRAP_BUDGET=N` sets another count and `N/SECONDS` another window.
+- **Validation at the boundary.** A request-shaped integer should be checked
+  before it reaches arithmetic, which is what [Decoding
+  input](/docs/cookbook/decoding-input/) is for. The `checked_*` forms answer
+  `None` where `*` would trap.
+- **More than one process.** Running out of stack, a trap in a finalizer and
+  the runtime's own fatal errors still end the process, so a service still
+  wants a supervisor and a second instance.
+
+A service that would rather stop on the first bug opts out:
+
+```khora
+Router::new()
+  |> Router::uncontained
+  |> Router::get("/", SharedFn::of(index))
+  |> Router::listen(8080)!
+```
+
+With that, a trap in a handler ends the process with status 134, taking every
+in-flight request with it. [Traps](/docs/reference/traps/#what-this-means-for-a-server)
 has the whole of it.
 
 For the complete router, request, response, and client surface, see the [HTTP API reference](/docs/stdlib/api/net/http/).

@@ -19,7 +19,8 @@ language rule, a supported feature, and unfinished work.
   children.
 - [Work taken off a queue survives cancellation, not a crash](#work-taken-off-a-queue):
   `Channel::claim` hands an unsettled job to its handler on every way out of
-  the program except SIGKILL, a trap, and a handler cut short by `abort`.
+  the program except SIGKILL, a trap that nothing contains, and a handler cut
+  short by `abort`.
 - [A canceled fiber waiting on a child stops only when the child
   does](#a-canceled-fiber-waiting-on-a-child-stops-when-the-child-does), if
   it holds the child's last handle.
@@ -671,8 +672,11 @@ Ctrl-C. What it does not reach:
 
 - **SIGKILL, running out of memory, power loss.** No cleanup runs, and the job
   in an in-memory channel is gone.
-- **A trap** (overflow, `todo()`, an index out of range) ends the process at
-  status 134 without running cleanup.
+- **A trap with no `contain` to take it** (overflow, `todo()`, an index out of
+  range, on a fiber with no `contain` of its own, or past the trap budget)
+  ends the process at status 134 without running cleanup. A trap that a
+  `contain` takes -- which includes one in a `Router` handler -- leaves the
+  way a cancellation does.
 - **`Fiber::abort`** starts the handler, which runs until the first loop
   trip, `!` or blocking call it reaches. A handler made of `Channel::offer`
   and `Shared::set` has none and runs to its end; one with a loop or a wait

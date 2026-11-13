@@ -114,6 +114,18 @@ pub(crate) struct Fiber {
     /// one takes no hold: [`Fiber::hold_next_entry_poll`]. Only the running
     /// fiber touches this.
     acquiring: AtomicUsize,
+    /// How many `contain` frames are open on this fiber's stack.
+    ///
+    /// **On the fiber, never the thread**: a child does not inherit its
+    /// parent's `contain`, and a trap is answered with a return only while
+    /// this is above zero (`crate::fibertrap`). Only the running fiber
+    /// touches it.
+    contained: AtomicUsize,
+    /// What the last trap contained on this fiber said, for `contain` to
+    /// hand back. On the fiber because the unwind between the trap and the
+    /// `contain` frame runs finalizers, which may park and resume on another
+    /// worker.
+    trap_message: Mutex<String>,
     /// The `timeout` scopes this fiber is inside, outermost first.
     /// [`crate::timeout`] has the protocol; the lock is what orders a
     /// deadline firing against the scope it belongs to ending.
@@ -272,6 +284,8 @@ impl Fiber {
             pinned: AtomicUsize::new(0),
             entry_held: std::sync::atomic::AtomicU8::new(ENTRY_FREE),
             acquiring: AtomicUsize::new(0),
+            contained: AtomicUsize::new(0),
+            trap_message: Mutex::new(String::new()),
             deadlines: Mutex::new(Vec::new()),
             fired_scopes: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
@@ -316,6 +330,8 @@ impl Fiber {
             pinned: AtomicUsize::new(0),
             entry_held: std::sync::atomic::AtomicU8::new(ENTRY_FREE),
             acquiring: AtomicUsize::new(0),
+            contained: AtomicUsize::new(0),
+            trap_message: Mutex::new(String::new()),
             deadlines: Mutex::new(Vec::new()),
             fired_scopes: AtomicUsize::new(0),
             #[cfg(any(debug_assertions, feature = "fiber-audit"))]
@@ -988,6 +1004,16 @@ impl Fiber {
     pub(crate) fn unshield(&self) {
         let depth = self.shielded.load(COUNTER_ORDER);
         self.shielded.store(depth.saturating_sub(1), COUNTER_ORDER);
+    }
+
+    /// The `contain` depth; the field says why it is on the fiber.
+    pub(crate) fn contained(&self) -> &AtomicUsize {
+        &self.contained
+    }
+
+    /// The last contained trap's sentence. See the field.
+    pub(crate) fn trap_message(&self) -> &Mutex<String> {
+        &self.trap_message
     }
 }
 

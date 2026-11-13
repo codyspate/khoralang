@@ -61,6 +61,18 @@ thread_local! {
     /// larger of two, `mul` takes their sum, and `divide` was told.
     static SPARE: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
 
+    /// Set when the last operation trapped inside a `contain` and answered a
+    /// meaningless value ([`refuse`]); cleared by the one read of it.
+    ///
+    /// **Not a third field of [`SPARE`]**, which is what the design said and
+    /// what was measured first: every answer then had to clear it, a store
+    /// in each `Decimal` operation that nothing needs. It is read only on the
+    /// line after the call that set it, through
+    /// `crate::fibertrap::khora_trap_taken`, which generated code calls only
+    /// when the process-wide pending word says a trap is waiting, and that
+    /// read clears it.
+    static TRAPPED: Cell<bool> = const { Cell::new(false) };
+
     /// The low word of the last parse, which cannot travel in that function's
     /// return value because it has to say whether the text was a number.
     static LOW: Cell<i64> = const { Cell::new(0) };
@@ -75,6 +87,16 @@ fn wide(hi: i64, lo: i64) -> i128 {
 fn deliver(value: i128, scale: i64) -> i64 {
     SPARE.with(|spare| spare.set(((value >> 64) as i64, scale)));
     value as u64 as i64
+}
+
+/// Marks this thread's last operation as a contained trap.
+pub(crate) fn mark_trapped() {
+    TRAPPED.with(|trapped| trapped.set(true));
+}
+
+/// Whether this thread's last operation was a contained trap. Clears it.
+pub(crate) fn take_trapped() -> bool {
+    TRAPPED.with(|trapped| trapped.replace(false))
 }
 
 /// The high word of the last answer. Read on the line after the operation.
@@ -95,7 +117,8 @@ pub extern "C" fn khora_decimal_low() -> i64 {
     LOW.with(|low| low.get())
 }
 
-/// Stops the program, printing `sentence` as the whole of what happened.
+/// Stops the program, printing `sentence` as the whole of what happened --
+/// or, inside a `contain`, reports it and answers a meaningless zero.
 ///
 /// The same report generated code makes for `Int` arithmetic, so a decimal
 /// that overflows and a multiplication that overflows read the same way.
@@ -105,7 +128,17 @@ pub extern "C" fn khora_decimal_low() -> i64 {
 /// the failure this type exists to prevent" — which is a description of
 /// saturating. `numbers.md` §"Overflow traps, in every build" is the argument
 /// and decimals were never outside it.
-fn refuse(sentence: &str) -> ! {
+///
+/// **The zero is never a total anybody sees.** It is answered only when
+/// `crate::fibertrap` contains the trap, which marks [`SPARE`] and the
+/// process-wide pending word; the generated code after the call leaves the
+/// frame before it reads the answer. The decision is made before anything
+/// here is written, so a contained trap leaves no half-made state behind.
+fn refuse<T: Default>(sentence: &str) -> T {
+    if crate::fibertrap::runtime_trap(sentence) {
+        crate::fibertrap::pend();
+        return T::default();
+    }
     // SAFETY: a string literal in `.rodata`, live for the whole run.
     unsafe { crate::trap::khora_overflow(sentence.as_ptr(), sentence.len() as u64) }
 }
@@ -129,10 +162,6 @@ fn ten_to(power: i64) -> Option<i128> {
     10i128.checked_pow(power as u32)
 }
 
-/// `value` moved to a scale `by` places larger, or a stopped program.
-fn raised(value: i128, by: i64, what: &str) -> i128 {
-    try_raised(value, by).unwrap_or_else(|| refuse(what))
-}
 
 /// `value` moved to a scale `by` places larger, or `None` if it does not fit.
 fn try_raised(value: i128, by: i64) -> Option<i128> {
@@ -188,7 +217,7 @@ pub extern "C" fn khora_decimal_add(
     b_scale: i64,
 ) -> i64 {
     let Some((value, scale)) = sum(a_hi, a_lo, a_scale, b_hi, b_lo, b_scale) else {
-        refuse("Decimal addition overflowed")
+        return refuse("Decimal addition overflowed");
     };
     deliver(value, scale)
 }
@@ -204,7 +233,7 @@ pub extern "C" fn khora_decimal_sub(
     b_scale: i64,
 ) -> i64 {
     let Some((value, scale)) = difference(a_hi, a_lo, a_scale, b_hi, b_lo, b_scale) else {
-        refuse("Decimal subtraction overflowed")
+        return refuse("Decimal subtraction overflowed");
     };
     deliver(value, scale)
 }
@@ -214,7 +243,10 @@ pub extern "C" fn khora_decimal_sub(
 pub extern "C" fn khora_decimal_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> i64 {
     const WHAT: &str = "Decimal multiplication overflowed";
     let (a, b) = (wide(a_hi, a_lo), wide(b_hi, b_lo));
-    deliver(a.checked_mul(b).unwrap_or_else(|| refuse(WHAT)), 0)
+    match a.checked_mul(b) {
+        Some(product) => deliver(product, 0),
+        None => refuse(WHAT),
+    }
 }
 
 /// [`khora_decimal_add`], answering `0` where it would stop the program.
@@ -261,7 +293,10 @@ pub extern "C" fn khora_decimal_rescale(hi: i64, lo: i64, from: i64, to: i64) ->
     if to <= from {
         return deliver(value, from);
     }
-    deliver(raised(value, to - from, WHAT), to)
+    match try_raised(value, to - from) {
+        Some(moved) => deliver(moved, to),
+        None => refuse(WHAT),
+    }
 }
 
 /// The whole part, towards zero, as an `Int`.
@@ -276,7 +311,10 @@ pub extern "C" fn khora_decimal_rescale(hi: i64, lo: i64, from: i64, to: i64) ->
 pub extern "C" fn khora_decimal_truncated(hi: i64, lo: i64, scale: i64) -> i64 {
     let value = wide(hi, lo);
     let Some(step) = ten_to(scale.max(0)) else { return 0 };
-    i64::try_from(value / step).unwrap_or_else(|_| refuse("Decimal truncation overflowed"))
+    match i64::try_from(value / step) {
+        Ok(whole) => whole,
+        Err(_) => refuse("Decimal truncation overflowed"),
+    }
 }
 
 /// Whether the significand is negative, which its digits do not say.

@@ -71,5 +71,6 @@ max-threads = 4
 filter = '''
     test(/^http/) or test(/^tls/) or test(/^reference::/)
     or test(/^sockets::/) or test(/^postgres::/) or test(/^load::/)
+    or test(/^traps_in_a_server::/)
 '''
 test-group = 'networked'

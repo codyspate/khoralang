@@ -214,12 +214,12 @@ impl<'ctx> Lower<'_, 'ctx> {
         let (fallthrough, mut escapes) = match rest.is_empty() {
             true if total => (
                 self.block("catch.missed"),
-                vec![runtime::CANCELED_WHICH, runtime::FAILED_WHICH],
+                vec![runtime::CANCELED_WHICH, runtime::FAILED_WHICH, runtime::TRAPPED_WHICH],
             ),
             true => (onward, Vec::new()),
             false => (
                 self.block("catch.rest"),
-                vec![runtime::CANCELED_WHICH, runtime::FAILED_WHICH],
+                vec![runtime::CANCELED_WHICH, runtime::FAILED_WHICH, runtime::TRAPPED_WHICH],
             ),
         };
         let mut cases = cases;
@@ -261,7 +261,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // program instead. It costs nothing, because the path never runs.
         self.at(onward);
         if self.catches.is_empty() && !self.raises && !self.tagged {
-            self.trap(
+            self.trap_fatal(
                 "a cancellation or an error reached a `catch` in a function the compiler \
                  decided could not be canceled; this is a compiler bug",
             );
@@ -270,7 +270,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
         if total {
             self.at(fallthrough);
-            self.trap(
+            self.trap_fatal(
                 "an error reached a `catch` whose arms the compiler decided handle \
                  everything its operand raises, and no arm names it; this is a compiler bug",
             );

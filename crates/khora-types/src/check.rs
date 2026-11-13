@@ -113,6 +113,17 @@ pub(crate) struct Checker<'a> {
     pub(crate) types: &'a TypeMap,
     pub(crate) body: &'a Body,
     pub(crate) signature: &'a Signature,
+    /// What this file's imports bring in, and what each is called where it
+    /// is defined: an alias is a spelling, and a rule about
+    /// `std::core::contain` is about the definition.
+    pub(crate) scope: &'a khora_hir::FileScope,
+    /// Whether this file is one of the standard library's own; see
+    /// [`crate::standard_library::is_std_file`].
+    pub(crate) in_std: bool,
+    /// The callees of the calls checked so far. A guarded function named
+    /// anywhere else is a value, and refused: see
+    /// [`Checker::refuse_guarded_as_a_value`].
+    pub(crate) called_directly: HashSet<ExprId>,
     pub(crate) locals: HashMap<LocalId, Type>,
     pub(crate) exprs: HashMap<ExprId, Type>,
     pub(crate) instantiations: HashMap<ExprId, (String, Vec<Type>)>,

@@ -970,6 +970,19 @@ nursery(gather)! catch {
 }
 ```
 
+### Trapped
+
+```khora
+derive(Show, Eq)
+pub type Trapped = { pub message: String };
+```
+
+A trap that `contain` stopped from ending the process.
+
+Not an error any row declared: an overflow, an index out of range, a
+division by zero, a narrowing that did not fit, a `todo()`, a `Decimal`
+that did not fit. `message` is the sentence the trap printed.
+
 ### Raised
 
 ```khora
@@ -7899,6 +7912,90 @@ match attempt(fn () => checkout(sku, cents)!) {
 one allocation per failure. A loop that handles one error type on its hot
 path should use `catch`, which handles the error where it arrives and
 allocates nothing.
+
+### contain
+
+```khora
+pub fn contain<A, 'er, 'ef>(body: () -> A with 'ef raises 'er) -> Result<A, Trapped> with 'ef raises 'er
+```
+
+Runs `body`, and if it traps, answers the trap rather than ending the
+process.
+
+```khora
+match contain(fn () => charge(account, amount)!)! {
+  Result::Ok(receipt) => Response::json(200, receipt),
+  Result::Err(trapped) => Response::text(500, trapped.message),
+}
+```
+
+**Only the trapping fiber is affected.** Everything `body` held between
+the trap and here is released on the way out, the way a cancellation
+releases it, and every region it opened runs its finalizers. A
+`Shared::update` or `modify` whose change function trapped leaves the cell
+as it was. The trap is printed to stderr with the fiber's number and
+`(contained; the fiber continues)`.
+
+**An error goes on as an error, and a cancellation as a cancellation.**
+Only a trap becomes `Err`. A `catch` or an `attempt` inside `body` does
+not see a trap: it passes through them to here.
+
+**What `body` may capture is what `Fiber::spawn`'s body may**: no
+`mut` record, `Array` or `Region` from outside. A trap halfway through
+writing one would leave it half-written after `contain` returned. A
+`Shared` cell, a `Channel` and immutable values are fine. `contain` is
+called directly, under any name an import gives it; it cannot be held
+as a value or passed to another function, because then nothing could
+check what its body captures. For the same reason a helper that takes a
+closure and hands it on to `contain` is refused at the helper: write
+`contain` around the closure where it is written, or pass a named
+function.
+
+**Still fatal, with status 134**: a trap in a fiber with no `contain` of
+its own (a spawned child does not inherit its parent's), a trap in a
+finalizer (a `contain` written inside the finalizer included), running
+out of stack, and the runtime's own fatal errors. So is
+any trap once the process has contained 1,000 in the last 60 seconds:
+`KHORA_TRAP_BUDGET=N` or `N/SECONDS` sets another budget, and a bug a
+request can reach over and over then ends the process, where a supervisor
+sees it. On WebAssembly nothing is contained.
+
+**What it costs.** Each place that can trap is a way out of its function,
+as a loop or a `!` is, so a function that does checked arithmetic or
+indexes an array returns a tag and its callers test it. The trap path
+itself is out of the way of the code that does not trap.
+
+### contain_with
+
+```khora
+pub fn contain_with<V, A, 'er, 'ef>(value: V, body: (V) -> A with 'ef raises 'er) -> Result<A, Trapped> with 'ef raises 'er
+```
+
+`contain(fn () => body(value))`, with `value` handed to `body` rather than
+captured by it, for the standard library's own use.
+
+**What this is for: a `Router` request.** Every `Request` holds `Map`s,
+and a `Map` has `mut` fields, so `contain`'s capture rule refuses a
+closure that captures one -- rightly, in general: a trap part-way through
+writing a captured value leaves it half-written for the code after
+`contain`. Here the value is *moved* in, and that is what makes it sound
+for the caller that uses it: the `Request` is built for one request by
+`Connection::next`, handed to this call, and nothing in
+`Router::answer_on_holding` reads it after. A trap that leaves it
+half-written leaves it where nobody looks. `body`'s own captures are held
+to `contain`'s rule as usual.
+
+**Only the standard library may call it**, because the soundness argument
+is about the caller: a call whose argument is a binding used again
+afterwards would read the half-written value, and the checker does not
+know last use (the Perceus pass does, after checking). A public version
+would refuse exactly that. Only called directly, too: like `contain`, it
+cannot be taken as a value or reached under another name.
+
+**"The standard library" is the package resolver's answer**: the files
+that came from the toolchain's `std` directory. A package that declares
+a module `std::...`, at its root or as a dependency named `std`, is not
+one of them, and its call is refused like any other.
 
 ### timeout
 

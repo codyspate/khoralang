@@ -19,6 +19,33 @@ struct Ran {
     code: Option<i32>,
 }
 
+/// Every `.kh` file of `std` for this target, plus the program under test.
+///
+/// **With `std`, because `attempt` is `std::core`'s.** A program's own
+/// bodiless `attempt` is not the intrinsic: code generation builds its answer
+/// to `std::core`'s type, and an own declaration of another type read one
+/// value's bytes as another's.
+fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceFile> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(here) = stack.pop() {
+        for entry in std::fs::read_dir(&here).expect("a readable std") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                out.push(SourceFile::new(db, path, text));
+            }
+        }
+    }
+    out.push(SourceFile::new(db, dir.join("main.kh"), main.to_string()));
+    out
+}
+
 fn run(name: &str, source: &str) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
@@ -27,8 +54,7 @@ fn run(name: &str, source: &str) -> Ran {
     let _ = std::fs::remove_file(&exe);
 
     let db = KhoraDatabase::new();
-    let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
-    let root = SourceRoot::new(&db, vec![file]);
+    let root = SourceRoot::new(&db, sources(&db, &dir, source));
 
     if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
@@ -42,17 +68,15 @@ fn run(name: &str, source: &str) -> Ran {
     }
 }
 
-/// `Result` and `attempt` are declared here rather than imported so this stays
-/// one file. `std::core` spells them the same way, and `retry` below is copied
-/// from it unchanged — which is the point: it is a library function, not a
-/// compiler feature.
+/// `retry` is written here rather than imported from `std::resilience`,
+/// whose version also waits between attempts and so needs a clock and a
+/// random source: this one is the loop alone, written against `attempt` --
+/// which is the point: it is a library function, not a compiler feature.
 const PRELUDE: &str = "module t;
+import std::core::{Raised, Result, attempt};
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 extern fn khora_tick() -> Int;
-
-pub type Result<A, E> = | Ok(value: A) | Err(error: E);
-pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
 
 pub type Oops = | Bad;
 
@@ -61,9 +85,9 @@ impl Schedule {
   fn times(n: Int) -> Schedule { { attempts: if n < 1 { 1 } else { n } } }
 }
 
-pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
+pub fn retry<A, 'er, 'e>(schedule: Schedule, body: () -> A with 'e raises 'er) -> A
   with 'e
-  raises E
+  raises 'er
 {
   let mut left = schedule.attempts - 1;
   let mut outcome = attempt(body);
@@ -94,11 +118,11 @@ fn halve(n: Int) -> Int raises Oops {{
   if n % 2 == 0 {{ n / 2 }} else {{ raise Oops::Bad }}
 }}
 
-fn describe(r: Result<Int, Oops>) -> Int {{
+fn describe(r: Result<Int, Raised<Oops>>) -> Int {{
   match r {{ Result::Ok(v) => v, Result::Err(e) => 0 - 1 }}
 }}
 
-fn main() -> Int {{
+pub fn main() -> Int {{
   print(describe(attempt(fn () => halve(8)!)));
   print(describe(attempt(fn () => halve(7)!)));
   print(khora_live_count());
@@ -119,8 +143,7 @@ fn retry_runs_again_until_it_works() {
         &format!(
             "{PRELUDE}
 /// Fails the first two times it is called, then works. Counting is the
-/// runtime's job because Khora has no mutable state yet — D11 — and a retry
-/// that cannot be observed repeating is not much of a test.
+/// runtime's job, so that the count survives being retried.
 fn flaky() -> Int raises Oops {{
   let n = khora_tick();
   print(n);
@@ -128,7 +151,7 @@ fn flaky() -> Int raises Oops {{
   n
 }}
 
-fn main() -> Int raises Oops {{
+pub fn main() -> Int raises Oops {{
   print(retry(Schedule::times(5), fn () => flaky()!)!);
   0
 }}
@@ -149,7 +172,7 @@ fn retry_gives_up_and_reports_the_last_failure() {
             "{PRELUDE}
 fn always_fails() -> Int raises Oops {{ print(1); raise Oops::Bad }}
 
-fn main() -> Int raises Oops {{
+pub fn main() -> Int raises Oops {{
   print(retry(Schedule::times(3), fn () => always_fails()!)!);
   0
 }}
@@ -169,7 +192,7 @@ fn a_schedule_of_one_does_not_retry() {
             "{PRELUDE}
 fn always_fails() -> Int raises Oops {{ print(1); raise Oops::Bad }}
 
-fn main() -> Int raises Oops {{
+pub fn main() -> Int raises Oops {{
   print(retry(Schedule::times(1), fn () => always_fails()!)!);
   0
 }}
@@ -198,7 +221,7 @@ fn work() -> Int {{
   match outcome {{ Result::Ok(v) => v, Result::Err(e) => 0 - 1 }}
 }}
 
-fn main() -> Int {{
+pub fn main() -> Int {{
   print(work());
   print(khora_live_count());
   0

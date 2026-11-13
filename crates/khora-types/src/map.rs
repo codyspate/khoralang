@@ -247,6 +247,26 @@ impl TypeMap {
     /// The message has to say which, or a reader whose capability was refused
     /// goes looking for a `mut` field that is not there.
     pub fn why_unshareable(&self, ty: &Type) -> String {
+        self.why_not_shareable(ty, "two fibers writing one value is a race")
+    }
+
+    /// [`Self::why_unshareable`], said of `std::core::contain`'s body.
+    ///
+    /// **What this prevents: a refusal that gives the wrong reason.** A
+    /// writable value is refused there for what a trap leaves behind, not for
+    /// a race: `contain` is one fiber. The other reasons -- a closure, a type
+    /// parameter, a value that stays on its fiber -- are the same sentences.
+    pub fn why_not_containable(&self, ty: &Type) -> String {
+        self.why_not_shareable(
+            ty,
+            "a trap part-way through writing it would leave it half-written, and the code \
+             after `contain` would see that",
+        )
+    }
+
+    /// The reasons both share; `written` finishes the sentence for a value
+    /// that can be written.
+    fn why_not_shareable(&self, ty: &Type, written: &str) -> String {
         if let Some((bound, subject)) = self.fiber_bound_inside(ty) {
             return stays_on_its_fiber_because(bound, &subject);
         }
@@ -313,7 +333,7 @@ impl TypeMap {
                  of function types, so this is every capability"
             )
         } else {
-            format!("`{ty}` can be written, and two fibers writing one value is a race")
+            format!("`{ty}` can be written, and {written}")
         }
     }
 

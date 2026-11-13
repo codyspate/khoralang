@@ -294,7 +294,7 @@ pub(super) fn build(
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
         let symbol = instance.symbol();
-        let stops = |site| can_stop_at(&backend, mono, &symbol, body, site);
+        let stops = |site| can_stop_at(&backend, mono, &symbol, body, instance_types, site);
         let plan = khora_perceus::plan(
             body,
             instance_types,
@@ -328,7 +328,7 @@ pub(super) fn build(
         // A lambda's sites are the enclosing function's: it is lowered with
         // that function's `owner`, so `mono.callee` is asked the same way.
         let owner_symbol = owner.symbol();
-        let stops = |at| can_stop_at(&backend, mono, &owner_symbol, body, at);
+        let stops = |at| can_stop_at(&backend, mono, &owner_symbol, body, owner_types, at);
         // The owner's entry poll is not the lambda's, and a lambda's own
         // parameters are released by `emit_closure`, not by this plan.
         let plan = khora_perceus::plan(
@@ -511,6 +511,7 @@ fn can_stop_at(
     mono: &khora_types::mono::Instances,
     owner: &str,
     body: &khora_hir::body::Body,
+    types: &khora_types::BodyTypes,
     site: khora_hir::body::ExprId,
 ) -> bool {
     use khora_hir::body::Expr;
@@ -532,9 +533,17 @@ fn can_stop_at(
             }
             _ => true,
         },
-        // An operator that dispatches is a call, and one that does not is an
-        // instruction.
-        Expr::Binary { .. } => mono.callee(owner, site).is_some_and(|symbol| leaves_from(&symbol)),
+        // An operator that dispatches is a call. One that does not is an
+        // instruction, which leaves only if it traps: checked integer
+        // arithmetic, whose trap a `contain` takes out of the frame.
+        Expr::Binary { op, lhs, .. } => match mono.callee(owner, site) {
+            Some(symbol) => leaves_from(&symbol),
+            None => {
+                use khora_hir::body::BinOp;
+                matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem)
+                    && matches!(types.of(*lhs), khora_types::Type::Int | khora_types::Type::Fixed(_))
+            }
+        },
         // Lowered as the value alone when nothing was resolved.
         Expr::Shown(_) | Expr::Walked(_) => {
             mono.callee(owner, site).is_some_and(|symbol| leaves_from(&symbol))

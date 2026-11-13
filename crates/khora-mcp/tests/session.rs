@@ -160,6 +160,36 @@ fn a_syntax_error_says_it_does_not_parse() {
     assert!(text(find(&replies, 2)).contains("does not parse"), "{}", text(find(&replies, 2)));
 }
 
+/// **A snippet that names itself `std::..` is not the standard library.**
+/// The tool says "This compiles" only about what `khora run` would compile:
+/// a snippet declaring `module std::evil` was taken for std's own, so it
+/// could call `contain_with` and declare its own bodiless `attempt`, both
+/// of which the build refuses.
+#[test]
+fn a_snippet_named_std_gets_no_standard_library_exemption() {
+    let contain_with = "module std::evil;\n\
+                        import std::core::{Array, Result, contain_with};\n\
+                        pub fn poke() -> Int {\n\
+                          let xs: Array<Int> = Array::new(2, 0);\n\
+                          let _ = contain_with(xs, fn ys => { Array::set(ys, 0, 7); Array::get(ys, 5) });\n\
+                          Array::get(xs, 0)\n\
+                        }\n";
+    let own_attempt = "module std::evil;\n\
+                       import std::core::{Result};\n\
+                       fn attempt<A>(body: () -> A) -> Result<A, String>;\n\
+                       pub fn poke() -> Int {\n\
+                         match attempt(fn () => 41) { Result::Ok(v) => v, Result::Err(_) => 0 }\n\
+                       }\n";
+    for (id, source, refusal) in [
+        (2, contain_with, "`contain_with` is the standard library's own"),
+        (3, own_attempt, "`attempt` has no body"),
+    ] {
+        let replies = session(&[initialize(), call(id, "khora_check", json!({ "source": source }))]);
+        let answer = text(find(&replies, id));
+        assert!(answer.contains(refusal), "{answer}");
+    }
+}
+
 /// A tool failure has to arrive as content with `isError`, not as a JSON-RPC
 /// error — an agent can read the first and usually cannot see the second.
 #[test]

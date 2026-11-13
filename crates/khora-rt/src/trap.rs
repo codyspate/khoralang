@@ -391,11 +391,16 @@ fn where_from(err: &mut impl Write) {
 /// whole `#[unsafe(no_mangle)]` surface; a fifth belongs here the day it is
 /// added, which is why they sit next to each other rather than being derived.
 fn from_khora_down(captured: &str) -> &str {
-    const MINE: [&str; 5] = [
+    // `khora_overflow` and `khora_todo` also match their `_contain` forms,
+    // which sit one frame below them when a site compiled to leave was not
+    // inside a `contain`; `khora_bounds_contain` does not, so it is named.
+    const MINE: [&str; 7] = [
         "khora_rt::trap::",
+        "khora_rt::fibertrap::",
         "khora_overflow",
         "khora_unhandled",
         "khora_bounds_fail",
+        "khora_bounds_contain",
         "khora_todo",
     ];
     let Some(last) = MINE.iter().filter_map(|m| captured.rfind(m)).max() else {

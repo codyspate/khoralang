@@ -112,7 +112,10 @@ impl<'a> Checker<'a> {
         range: TextRange,
     ) {
         let name = self.body.local(local).name.clone();
-        let why = self.types.why_unshareable(ty);
+        let why = match crossing {
+            Crossing::Fiber | Crossing::Certified => self.types.why_unshareable(ty),
+            Crossing::Contain => self.types.why_not_containable(ty),
+        };
         let at_use = match self.types.fiber_bound_inside(ty) {
             Some((crate::FiberBound::Db, _)) => self.capture_uses.get(&(body, local)).copied(),
             Some((
@@ -127,16 +130,27 @@ impl<'a> Checker<'a> {
                 let taker = match crossing {
                     Crossing::Fiber => "fiber spawned",
                     Crossing::Certified => "closure certified",
+                    Crossing::Contain => "`contain`",
+                };
+                let refusal = match crossing {
+                    Crossing::Fiber | Crossing::Certified => "cannot be handed to another fiber",
+                    Crossing::Contain => CONTAIN_REFUSES,
                 };
                 self.error(
                     format!(
-                        "`{name}` cannot be handed to another fiber, and the {taker} at line \
-                         {line}, column {column} uses it here: {why}"
+                        "`{name}` {refusal}, and the {taker} at line {line}, column {column} \
+                         uses it here: {why}"
                     ),
                     used,
                 );
             }
-            None => self.error(format!("`{name}` cannot be handed to another fiber: {why}"), range),
+            None => {
+                let refusal = match crossing {
+                    Crossing::Fiber | Crossing::Certified => "cannot be handed to another fiber",
+                    Crossing::Contain => CONTAIN_REFUSES,
+                };
+                self.error(format!("`{name}` {refusal}: {why}"), range)
+            }
         }
     }
 
@@ -189,7 +203,13 @@ impl<'a> Checker<'a> {
                 // A certified closure's error is raised on the fiber that
                 // calls it, so a `Raised` in it was made there and stays.
                 match (bound, crossing) {
-                    (crate::FiberBound::Raised, Crossing::Certified) => continue,
+                    (crate::FiberBound::Raised, Crossing::Certified | Crossing::Contain) => continue,
+                    // `contain`'s body raises on the caller's fiber, to the
+                    // caller: nothing in its error crosses or is half-written.
+                    (
+                        crate::FiberBound::Region | crate::FiberBound::Scope | crate::FiberBound::Db,
+                        Crossing::Contain,
+                    ) => continue,
                     (crate::FiberBound::Raised, Crossing::Fiber)
                     | (
                         crate::FiberBound::Region | crate::FiberBound::Scope | crate::FiberBound::Db,
@@ -208,7 +228,7 @@ impl<'a> Checker<'a> {
             }
             match crossing {
                 Crossing::Fiber => {}
-                Crossing::Certified => continue,
+                Crossing::Certified | Crossing::Contain => continue,
             }
             if self.types.is_shareable(error, &self.shared_params()) {
                 continue;
@@ -436,8 +456,9 @@ pub(crate) enum Captor {
 
 /// Where a checked closure's captures and error go.
 ///
-/// Two cases, matched exhaustively, because the error rule differs: a fiber's
-/// error reaches its joiner, and a certified closure's stays on its caller.
+/// Matched exhaustively, because the error rule differs: a fiber's error
+/// reaches its joiner, and a certified or contained closure's stays on its
+/// caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Crossing {
     /// `Fiber::spawn`: the body runs on another fiber and its error is joined.
@@ -445,7 +466,24 @@ pub(crate) enum Crossing {
     /// `SharedFn::of`: the closure may be held anywhere, and is called on the
     /// caller's fiber.
     Certified,
+    /// `std::core::contain`: the body runs on the caller's fiber, and may be
+    /// left part-way by a trap the caller then carries on after.
+    ///
+    /// **What this prevents: a value half-written by the trapping code and
+    /// read after `contain` returned.** `r.a = x; r.b = y / 0` leaves `r.a`
+    /// written and `r.b` not; when the trap ended the process nobody could
+    /// read `r`, and a contained one hands it back. So the captures are held
+    /// to `Fiber::spawn`'s rule: no `mut` record, `Array` or `Region` from
+    /// outside, and what is left reachable is immutable or a `Shared` cell,
+    /// which a trapped change function leaves as it was. The error is the
+    /// caller's, as a certified closure's is.
+    Contain,
 }
+
+/// The refusal a `contain` capture gets, in place of "cannot be handed to
+/// another fiber", which would be untrue: nothing crosses.
+const CONTAIN_REFUSES: &str = "cannot be captured by `contain`'s body, which a trap may leave \
+     part-way through writing it";
 
 /// The one-based line and column, in characters, where `range` starts in
 /// `source`.

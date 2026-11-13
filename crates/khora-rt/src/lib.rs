@@ -173,6 +173,7 @@ mod current;
 mod decimal;
 #[cfg(not(target_family = "wasm"))]
 mod fiber;
+mod fibertrap;
 #[cfg(not(target_family = "wasm"))]
 mod fs;
 #[cfg(not(target_family = "wasm"))]
@@ -239,6 +240,7 @@ pub use cancel::*;
 pub use counters::*;
 #[cfg(not(target_family = "wasm"))]
 pub use fiber::*;
+pub use fibertrap::*;
 #[cfg(not(target_family = "wasm"))]
 pub use handoff::*;
 #[cfg(not(target_family = "wasm"))]

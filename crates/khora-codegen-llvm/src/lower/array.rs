@@ -121,12 +121,27 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("comparing an index against a length");
         let ok = self.block("index.ok");
         let out = self.block("index.out");
-        self.be
+        let outside = self.be.builder.build_not(in_range, "index.outside").expect("negating");
+        let branch = self
+            .be
             .builder
-            .build_conditional_branch(in_range, ok, out)
+            .build_conditional_branch(outside, out, ok)
             .expect("branching on the bounds check");
+        self.weigh_as_never_taken(branch);
 
         self.at(out);
+        // Inside a `contain`, the runtime returns and this frame leaves; see
+        // `trap`, which this is the index-shaped twin of.
+        if self.can_leave_on_a_cancel() {
+            let fail = self.be.rt.bounds_contain;
+            self.be
+                .builder
+                .build_call(fail, &[index.into(), length.into()], "")
+                .expect("reporting an index out of range");
+            self.leave_trapped();
+            self.at(ok);
+            return;
+        }
         let fail = self.be.rt.bounds_fail;
         self.be
             .builder
@@ -297,7 +312,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let element = self.array_element(&array_ty, range)?;
                 let both = self.operands(&[*array, *index])?;
                 let (object, at) = (both[0].into_pointer_value(), both[1].into_int_value());
+                let held = self.hold_for_a_trap(&[(*array, both[0])]);
                 let slot = self.array_slot(object, at, self.stride(&element));
+                self.unhold(held);
 
                 let Some(llvm_ty) = self.be.llvm_type(&element) else {
                     return self.fail("an array of that element type cannot be read", range);
@@ -318,7 +335,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let element = self.array_element(&array_ty, range)?;
                 let all = self.operands(&[*array, *index, *value])?;
                 let (object, at, new) = (all[0].into_pointer_value(), all[1].into_int_value(), all[2]);
+                let held = self.hold_for_a_trap(&[(*array, all[0]), (*value, all[2])]);
                 let slot = self.array_slot(object, at, self.stride(&element));
+                self.unhold(held);
 
                 // A slot that owns something has to let go of it, whether it
                 // holds a pointer or a value that holds one.

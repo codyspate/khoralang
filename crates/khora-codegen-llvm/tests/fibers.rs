@@ -1445,13 +1445,16 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
 
 // --- what `attempt` may not turn into a value -------------------------------
 
-/// `attempt`, and something for it to run.
-const ATTEMPTING: &str = "
-pub type Result<A, E> = | Ok(A) | Err(E);
+/// `std::core`'s `attempt`, and something for it to run. Against the real
+/// `std`, because a program's own bodiless `attempt` is not the intrinsic:
+/// code generation builds its answer to `std::core`'s type.
+const ATTEMPTING: &str = "module t;
+import std::core::{Fiber, Raised, Region, Result, attempt};
+fn print(value: Int);
+extern fn khora_cancel();
 
-/// The intrinsic, declared: catching *whatever* a body raises is not something
-/// `catch` can express, so the compiler supplies the body.
-fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
+pub type Oops = | Bad;
+fn ok(n: Int) -> Int raises Oops { n }
 ";
 
 /// **A cancellation is not a failure, and `attempt` may not say it is.**
@@ -1473,10 +1476,10 @@ fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
 /// finalizer and was told its own cancellation was a database error.
 #[test]
 fn attempt_does_not_turn_a_cancellation_into_an_error() {
-    let ran = run(
+    let ran = run_std_on(
         "fiber_attempt_canceled",
         &format!(
-            "{CANCELABLE}{ATTEMPTING}
+            "{ATTEMPTING}
 fn worker() -> () raises Oops {{
   let region = Region::open();
   Region::defer(region, fn () => print(99));
@@ -1497,13 +1500,14 @@ fn run_it() -> () raises Oops {{
   Fiber::wait(f)!;
 }}
 
-fn main() -> Int {{
+pub fn main() -> Int {{
   run_it()! catch {{ Oops::Bad => () }};
   print(3);
   0
 }}
 "
         ),
+        "threads",
     );
     assert_eq!(
         ran.stdout, "1\n99\n3\n",
@@ -1516,13 +1520,13 @@ fn main() -> Int {{
 /// value, which is the whole point of `attempt`.
 #[test]
 fn attempt_still_makes_a_real_failure_a_value() {
-    let ran = run(
+    let ran = run_std_on(
         "fiber_attempt_error",
         &format!(
-            "{CANCELABLE}{ATTEMPTING}
+            "{ATTEMPTING}
 fn bad() -> Int raises Oops {{ raise Oops::Bad }}
 
-fn main() -> Int {{
+pub fn main() -> Int {{
   match attempt(fn () => bad()!) {{
     Result::Ok(n) => print(n),
     Result::Err(_) => print(-1),
@@ -1531,6 +1535,7 @@ fn main() -> Int {{
 }}
 "
         ),
+        "threads",
     );
     assert_eq!(ran.stdout, "-1\n");
     assert_eq!(ran.code, Some(0));

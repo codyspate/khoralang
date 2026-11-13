@@ -458,6 +458,7 @@ to carry — `Router<'er>` says only how its handlers can fail.
 pub type Router<'er> = {
   pub routes: List<Route<'er>>,
   pub limit: Int,
+  pub contained: Bool,
 };
 ```
 
@@ -485,6 +486,20 @@ On the router because that is the only thing a caller holds: the limit
 belongs to `Connection`, and every path from `listen` to it goes through
 five functions that had no reason to carry a number. `Router::holding`
 is how it is set.
+
+#### contained
+
+```khora
+pub contained: Bool
+```
+
+Whether each request runs inside `contain`.
+
+**What this prevents: one bad request ending every request the server
+is serving.** With it, a handler that traps -- an overflow, an index
+out of range, a `todo()` -- answers 500 and the requests beside it and
+after it are answered. `Router::uncontained` turns it off, for a
+service that would rather a supervisor restart it on the first bug.
 
 ### Url
 
@@ -1094,6 +1109,21 @@ Router::new()
   |> Router::post("/documents", SharedFn::of(store))
 ```
 
+#### uncontained
+
+```khora
+pub fn uncontained<'er>(router: Router<'er>) -> Router<'er>
+```
+
+The same router, with a trap in a handler ending the process.
+
+By default each request runs inside `contain`, so a trap in a handler
+is that request's 500 and the server goes on. This turns that off: the
+first trap ends the process with status 134, as it would with no
+`contain` anywhere, and something outside -- a supervisor, an
+orchestrator -- has to start it again. Worth choosing when a process
+that has hit a bug should not be trusted to serve the next request.
+
 #### on
 
 ```khora
@@ -1385,12 +1415,15 @@ rather than a call to itself, because Khora does not promise tail calls:
 a call per connection would cost a stack frame per connection on the
 thread running `main`, and an 8 MB stack holds about 130,000 of them.
 
-**A trap inside a handler ends the server, not the request.** This said
-the opposite, and `reference/traps.md` has always been right: there is no
-per-fiber trap containment, the page says so in bold, and it tells you
-not to design recovery around it. A doc comment promising the mechanism
-that page forbids is the worst place for the two to disagree, because
-this is the one a reader meets while writing the handler.
+**A trap inside a handler is that request's 500.** Each request runs
+inside `contain`, so an overflow, an index out of range or a division
+by zero in a handler answers `500 Internal Server Error`, prints the
+trap to stderr with `(contained; the fiber continues)`, and leaves every
+other request -- in flight beside it, or arriving after -- to be
+answered. Past the process's trap budget (1,000 in 60 seconds by
+default, `KHORA_TRAP_BUDGET`) the next trap ends the process with 134,
+so a bug a client can reach over and over still reaches a supervisor.
+[`Router::uncontained`](#uncontained) ends the process on the first trap instead.
 
 A trap is for a bug -- an index out of bounds, an overflow, a division by
 zero. Failures a handler is meant to survive belong in its failure row,

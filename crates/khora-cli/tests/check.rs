@@ -2060,6 +2060,177 @@ fn a_bodiless_function_nobody_uses_checks() {
     assert!(ok, "{output}");
 }
 
+/// **A program's own `attempt`, `within_deadline` or `contain_run` is not
+/// the intrinsic.** Code generation builds each one's answer to std's type,
+/// so a bodiless one declared with another type got std's answer read as its
+/// own: an own `attempt` typed `Result<A, String>` over an error of another
+/// type printed a megabyte of heap as the "string", and an own
+/// `within_deadline` was invalid LLVM IR. And an own `print` or
+/// `assert_that` declared with an answer std's does not have read a `()` as
+/// one. Each is now an ordinary bodiless function, refused where it is
+/// called; the right-shaped `print` stays the intrinsic (above).
+#[test]
+fn an_own_declaration_of_an_intrinsic_is_not_the_intrinsic() {
+    for (name, declared, called) in [
+        (
+            "own_attempt",
+            "fn attempt<A>(body: () -> A raises Oops) -> Result<A, String>;",
+            "match attempt(fn () => boom()!) { Result::Ok(_) => 0, Result::Err(s) => 1 }",
+        ),
+        (
+            "own_within_deadline",
+            "fn within_deadline<A>(millis: Int, body: () -> A) -> Option<String>;",
+            "match within_deadline(1000, fn () => 7) { Option::Some(_) => 0, Option::None => 1 }",
+        ),
+        (
+            "own_contain_run",
+            "fn contain_run<A>(body: () -> A) -> Option<A>;",
+            "match contain_run(fn () => 7) { Option::Some(_) => 0, Option::None => 1 }",
+        ),
+        ("own_print_answering", "fn print(value: Int) -> String;", "String::byte_length(print(7))"),
+        (
+            "own_assert_that_answering",
+            "fn assert_that(b: Bool, why: String) -> Int;",
+            "0 }\ntest \"t\" { let n = assert_that(true, \"x\"); ()",
+        ),
+    ] {
+        let source = format!(
+            "module m;\n\
+             pub type Result<A, E> = | Ok(A) | Err(E);\n\
+             pub type Option<A> = | Some(A) | None;\n\
+             pub type Oops = | Oops(Int);\n\
+             fn boom() -> Int raises Oops {{ raise Oops::Oops(1) }}\n\
+             {declared}\n\
+             pub fn main() -> Int {{ {called} }}\n"
+        );
+        let (ok, output) = check(name, &source);
+        assert!(!ok, "{name}: an own declaration was taken for the intrinsic:\n{output}");
+        assert!(output.contains("has no body"), "{name}:\n{output}");
+    }
+}
+
+/// **`contain_with` is the standard library's own, and the standard library
+/// is std's own files** -- not a module named `std::..`. A root package that
+/// declares `module std::evil`, or a dependency that calls itself `std` and
+/// declares one, called it and read the value it had moved in, half-written
+/// by a trap.
+///
+/// The gate is the package resolver's answer (which files came from the
+/// toolchain's `std` directory), and both of these defeat a gate that reads
+/// the `module` line.
+const CALLS_CONTAIN_WITH: &str = "import std::core::{Array, Result, contain_with};\n\
+    pub fn poke() -> Int {\n\
+      let xs: Array<Int> = Array::new(2, 0);\n\
+      let _ = contain_with(xs, fn ys => { Array::set(ys, 0, 7); Array::get(ys, 5) });\n\
+      Array::get(xs, 0)\n\
+    }\n";
+
+/// See [`CALLS_CONTAIN_WITH`].
+#[test]
+fn a_root_module_named_std_may_not_call_contain_with() {
+    let root = format!("module std::evil;\n{CALLS_CONTAIN_WITH}pub fn main() -> Int {{ poke() }}\n");
+    let (ok, output) =
+        check_package("contain_with_root_std", &[("khora.toml", MANIFEST), ("src/main.kh", &root)]);
+    assert!(!ok, "a root `module std::evil` called `contain_with`:\n{output}");
+    assert!(output.contains("`contain_with` is the standard library's own"), "{output}");
+}
+
+/// The same, from a dependency that calls itself `std`.
+#[test]
+fn a_dependency_named_std_may_not_call_contain_with() {
+    let dependency = format!("module std::evil;\n{CALLS_CONTAIN_WITH}");
+    let (ok, output) = check_packages(
+        "contain_with_dependency_std",
+        &[
+            ("dep/khora.toml", "[package]\nname = \"std\"\nversion = \"0.1.0\"\n"),
+            ("dep/src/lib.kh", &dependency),
+            (
+                "app/khora.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nstd = { path = \"../dep\" }\n",
+            ),
+            (
+                "app/src/main.kh",
+                "module app::main;\nimport std::evil::{poke};\npub fn main() -> Int { poke() }\n",
+            ),
+        ],
+    );
+    assert!(!ok, "a dependency named `std` called `contain_with`:\n{output}");
+    assert!(output.contains("`contain_with` is the standard library's own"), "{output}");
+}
+
+/// A directory reached as `<base>/hop1/hop2` whose real path is longer than
+/// `PATH_MAX`: two symbolic links over 25 levels of 200-character names. A
+/// file opens through the short spelling, and `canonicalize` of it fails
+/// with "file name too long".
+///
+/// Linux only: Linux checks `PATH_MAX` per call, so the chain can be built
+/// one short spelling at a time; macOS refuses the first `create_dir_all`
+/// of a path that long outright. The unit test on `really_under` in
+/// `khora-types` covers the same refusal on every platform.
+#[cfg(target_os = "linux")]
+fn past_path_max(base: &std::path::Path) -> PathBuf {
+    let _ = std::fs::remove_dir_all(base);
+    let level = "x".repeat(200);
+    let levels = |n: usize| vec![level.as_str(); n].join("/");
+    std::fs::create_dir_all(base.join(levels(12))).expect("the first twelve levels");
+    std::os::unix::fs::symlink(levels(12), base.join("hop1")).expect("the first link");
+    std::fs::create_dir_all(base.join("hop1").join(levels(13))).expect("the other thirteen");
+    std::os::unix::fs::symlink(levels(13), base.join("hop1").join("hop2")).expect("the second link");
+    base.join("hop1").join("hop2")
+}
+
+/// **A file is std's own by where it really is, and a file whose real path
+/// cannot be worked out is not std's.** A dependency's `path =` written as
+/// `<std>/../../..` and then out to a directory whose real path is longer
+/// than `PATH_MAX` could not be canonicalized, and the raw spelling, which
+/// still starts with the `std` directory, was compared instead: the
+/// dependency called `contain_with` and named `std::process::shell`, and
+/// both were let through.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dependency_spelled_through_the_std_directory_is_not_std() {
+    let std_dir = khora_db::standard_library()
+        .expect("a standard library beside the compiler")
+        .canonicalize()
+        .expect("the standard library's real path");
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("spelled_through_std");
+    let deep = past_path_max(&root.join("deep"));
+    assert!(deep.canonicalize().is_err(), "the fixture needs a path `canonicalize` cannot answer");
+    let up = "../".repeat(std_dir.components().count() - 1);
+    let relative = deep.strip_prefix("/").expect("an absolute scratch directory");
+    let spelled = format!("{}/{up}{}", std_dir.display(), relative.display());
+
+    let shell = "module inner;\nimport std::process::shell::{run};\npub fn poke() -> Int { 3 }\n".to_string();
+    for (name, lib, refusal) in [
+        ("contain_with", format!("module inner;\n{CALLS_CONTAIN_WITH}"), "`contain_with` is the standard library's own"),
+        ("shell", shell, "`std::process::shell` is part of `std`'s own implementation"),
+    ] {
+        std::fs::create_dir_all(deep.join("src")).expect("the dependency's src");
+        std::fs::write(deep.join("khora.toml"), "[package]\nname = \"inner\"\nversion = \"0.1.0\"\n")
+            .expect("the dependency's manifest");
+        std::fs::write(deep.join("src").join("lib.kh"), &lib).expect("the dependency's source");
+        let app = root.join("app");
+        let _ = std::fs::remove_dir_all(&app);
+        std::fs::create_dir_all(app.join("src")).expect("the app's src");
+        std::fs::write(
+            app.join("khora.toml"),
+            format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ninner = {{ path = \"{spelled}\" }}\n"),
+        )
+        .expect("the app's manifest");
+        std::fs::write(
+            app.join("src").join("main.kh"),
+            "module app::main;\nimport inner::{poke};\npub fn main() -> Int { poke() }\n",
+        )
+        .expect("the app's source");
+
+        let out = Command::new(env!("CARGO_BIN_EXE_khora")).arg("check").arg(&app).output().expect("could not run `khora`");
+        let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+        output.push_str(&String::from_utf8_lossy(&out.stderr));
+        assert!(!out.status.success(), "{name}: a dependency spelled through std was taken for std:\n{output}");
+        assert!(output.contains(refusal), "{name}:\n{output}");
+    }
+}
+
 /// **What `main` may return, and that it has a body, are `khora check`'s.**
 /// The build refused both, with no location, and one of them for a reason
 /// that was false: "this package has no `main` function".

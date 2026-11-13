@@ -136,7 +136,7 @@ By default, a trap:
 1. writes a diagnostic to standard error;
 2. identifies the operation or invalid index;
 3. identifies the spawned fiber when the trap occurred on one;
-4. terminates the process with status 134.
+4. terminates the process with status 134, unless a [`contain`](#containing-a-trap-with-contain) on the same fiber takes it.
 
 A trap with no backtrace says how to get one, so the first thing a person sees
 tells them what to do next:
@@ -157,6 +157,69 @@ runtime's own note gives.
 When debug information is available, the trace includes Khora source frames and locations. The runtime's own frames are trimmed from the top of it, so the first frame is the line in your program that trapped. Standard output is flushed before the process ends, so what the program had already printed is not lost.
 
 A process-fatal trap is **not** normal structured failure unwinding. Do not depend on regions, `catch`, or application finalizers to recover from it. Resource correctness must come from normal return, typed failure, and cancellation paths; a fatal trap means the process is ending.
+
+## Containing a trap with `contain`
+
+`std::core::contain` runs a function on the current fiber and, if it traps, answers the trap instead of ending the process:
+
+```khora
+import std::core::{Result, Trapped, contain};
+
+match contain(fn () => charge(account, amount)!)! {
+  Result::Ok(receipt) => Response::json(200, receipt),
+  Result::Err(trapped) => Response::text(500, "Internal Server Error"),
+}
+```
+
+`contain(body)` returns `Result<A, Trapped>`. `Trapped` has one field, `message`, the sentence the trap printed (`Int addition overflowed`, `index 11 is outside an array of 3`).
+
+**The trap leaves the way a cancellation does.** Every frame between the trap and the `contain` is left: what each one owned is released, every region opened in them runs its finalizers once, and a `Shared::update` or `Shared::modify` whose change function trapped leaves the cell holding its old value. Nothing is left half-released, so a server can contain a trap per request indefinitely without leaking.
+
+**Only a trap becomes `Err`.** An error raised inside `body` goes on as an error, out of `contain`, to whatever handles it; a cancellation goes on as a cancellation. A `catch` or an `attempt` inside `body` does not see a trap: it passes through them to the `contain`.
+
+**The trap is still reported.** It is printed to standard error as it would have been, followed by `(contained; the fiber continues)`:
+
+```
+khora: Int addition overflowed on fiber 7 (contained; the fiber continues)
+```
+
+**What `body` may capture is what a spawned fiber's body may.** A `mut` record, an `Array` or a `Region` from outside cannot be captured, because a trap halfway through writing one would leave it half-written after `contain` returned. A `Shared` cell, a `Channel` and immutable values are fine; `Shared` is the way to change something from inside a `contain`, because its update is all-or-nothing.
+
+**`contain` is called directly.** It may be imported under another name, but it cannot be bound to a variable, stored, or passed to another function: the capture rule is checked where the call is written, and a call through a value would skip it.
+
+**So a helper that takes a closure and hands it to `contain` cannot be written.** The closure arrived under a name, and what it captured was decided where it was written, which `contain` cannot see from here. The helper is refused, whichever way it forwards the closure:
+
+<!-- unchecked: this is the helper the compiler refuses -->
+```khora
+fn guard<A>(body: () -> A) -> Result<A, Trapped> {
+  contain(body)
+}
+```
+
+```text
+error: this has to be a closure written here or a named function, so that what it closes over
+can be checked — a closure that arrived under a name captured whatever it captured somewhere else
+```
+
+Wrapping it, `contain(fn () => body())`, is refused because the new closure captures `body`:
+
+```text
+error: `body` cannot be captured by `contain`'s body, which a trap may leave part-way through
+writing it: `() -> A` holds a closure, and what a closure captured is not in its type
+```
+
+Write `contain` where the work is written, around the closure itself, or pass a named function: `contain(handle_one)`.
+
+**Still fatal, with status 134:**
+
+- a trap on a fiber with no `contain` of its own. A spawned fiber, and each branch of a `race`, is its own fiber and does not inherit its parent's `contain`; the branches of a `select` run on the selecting fiber and do.
+- a trap in a finalizer, including one inside a `contain` written in the finalizer: nothing is contained while a finalizer runs. A finalizer that the unwind of a contained trap runs, and that traps itself, ends the process too; stderr then shows the first trap's `(contained; the fiber continues)` line, written when that trap was taken, just before the second trap's line.
+- the runtime's own fatal errors.
+- any trap once the process has contained 1,000 in the last 60 seconds. `KHORA_TRAP_BUDGET=N` sets another count, and `N/SECONDS` another window. A bug a request can reach over and over then ends the process, where a supervisor sees it, rather than turning into a stream of 500s.
+
+Running out of stack is not a trap and is not contained: the process prints `the stack ran out` and ends with the platform's stack-overflow status (`SIGSEGV`, which a shell reports as 139, on Unix), as in [Exit statuses](#exit-statuses). On WebAssembly nothing is contained, and `contain` runs `body` as an ordinary call.
+
+**What it costs.** Each place that can trap is a way out of its function, as a loop or a `!` is, so a function that does checked arithmetic or indexes an array returns a tag that its callers test. Where such a function is inlined into a loop, the optimizer removes the test, and the trap path is out of the way of the code that does not trap.
 
 ## Exit statuses
 
@@ -229,53 +292,60 @@ When an exported call is contained, the call is discarded and allocations create
 
 This is **not** a general exception mechanism and is not equivalent to `raises`.
 
-## Why containment is limited to exports
+## What the export boundary discards
 
 An exported C function has a deliberately narrow signature: scalars and `Ptr` cross the boundary; exported functions are not generic and do not expose Khora values, capability rows, or typed failures to the host. That makes the exported call a boundary whose newly created Khora allocations can be discarded without leaving a Khora object in the caller.
 
 If a guarded exported call spawns a fiber, containment is disarmed for that call. A spawned child may outlive the C call and may hold references to allocations made by it; freeing those allocations underneath the child would be unsound. In that case a trap retains the ordinary process-fatal behavior.
 
-There is currently no general request-fiber or arbitrary-fiber trap containment mechanism. Do not design application recovery around trapping inside a fiber and continuing the service.
+Inside a program, [`contain`](#containing-a-trap-with-contain) contains a trap on the fiber that hit it. The export boundary is for a host that calls into Khora from C and has no fiber of its own to put a `contain` on.
 
 ## What this means for a server
 
-**A trap in a request handler ends the server, not the request.** This is the
-consequence of everything above, and it is worth stating plainly because the
-code around a handler reads as though it were not true.
+**A trap in a request handler is that request's 500.** `Router` runs each
+request inside a `contain`, so a handler that overflows, indexes outside an
+array or divides by zero answers `500 Internal Server Error`, and the requests
+beside it and after it are answered as usual. The trap is printed to standard
+error with the fiber and `(contained; the fiber continues)`; the client is told
+nothing about it, because the sentence can name an index or a value.
 
-`Router::listen` serves each connection on its own fiber and wraps your handler
-so that a typed failure becomes a 500 rather than a dropped connection. That
-wrapper handles `raises`. A trap is not a raise: it does not unwind, so it does
-not reach the wrapper, and the process exits with status 134. Every other
-connection being served at that moment ends with it, including ones that had
-nothing to do with the request that trapped.
+The unit is the request, not the connection: on a keep-alive connection whose
+third request traps, the first two have been answered and the fourth is read
+as usual.
 
-Design for it in three places.
+`Router::uncontained` turns this off, and then the first trap in a handler ends
+the process with status 134, taking every request in flight with it:
+
+```khora
+Router::new()
+  |> Router::uncontained
+  |> Router::get("/", SharedFn::of(index))
+  |> Router::listen(8080)!
+```
+
+A contained trap is still a bug. Design for it in three places.
 
 **Validate at the boundary, not in the handler.** An integer that came from a
 request is external input until a schema has read it. `std::schema` rejects a
 port outside 1 to 65535 as a 400; the same value multiplied inside a handler
-traps and takes the process down. Arithmetic on such a value can use the
-`checked_*` forms above, which answer `None` where `*` would trap. This is the
-reason the standard library's own
-HTTP reader caps a `Content-Length` before multiplying it, answering 413 rather
-than trapping.
+traps, and the client gets a 500 that says nothing useful. Arithmetic on such a
+value can use the `checked_*` forms above, which answer `None` where `*` would
+trap. This is the reason the standard library's own HTTP reader caps a
+`Content-Length` before multiplying it, answering 413 rather than trapping.
 
-**Run more than one process.** Since the blast radius of a trap is the process,
-the unit of redundancy is the process. A server behind a load balancer with at
-least two instances survives one trapping; a single instance does not. This is
-ordinary operational practice and Khora does not change it, but a language that
-contained traps per request would let you skip it, and this one does not.
+**Watch the trap budget.** Once the process has contained 1,000 traps in 60
+seconds, the next one ends it with status 134. A bug a client can reach over and
+over -- or deliberately -- therefore becomes a crash a supervisor sees, rather
+than a stream of 500s discovered in a log a week later. `KHORA_TRAP_BUDGET=N`
+sets another count and `N/SECONDS` another window.
 
-**Expect a restart, and make it cheap.** Status 134 is a crash as far as a
-supervisor, container runtime or service manager is concerned, and the right
-response is a restart. Hold no state in the process that a restart cannot
-rebuild or that a second instance cannot serve from.
-
-What you get in exchange is that a trap is never silently swallowed. A handler
-that overflows is a bug in your program, and the process ending with a message
-naming the line is a louder and shorter path to fixing it than a 500 that
-happens to a fraction of requests and is discovered in a log a week later.
+**Run more than one process, and expect a restart.** What `contain` leaves fatal
+still ends the process: running out of stack, a trap in a finalizer or in a
+fiber a handler spawned without a `contain` of its own, the runtime's own fatal
+errors, and a spent budget. Status 134 is a crash as far as a supervisor,
+container runtime or service manager is concerned, and the right response is a
+restart. Hold no state in the process that a restart cannot rebuild or that a
+second instance cannot serve from.
 
 ## Validate external data before invariant operations
 

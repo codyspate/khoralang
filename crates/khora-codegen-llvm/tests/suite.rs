@@ -48,6 +48,7 @@ mod combinators;
 mod compile;
 mod concat_chain;
 mod connect_cancel;
+mod containment;
 mod conformance;
 mod config;
 mod crypto;

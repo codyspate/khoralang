@@ -50,7 +50,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     ),
                 }
             }
-            Expr::Path(khora_hir::Resolution::Item { name, .. }) => {
+            Expr::Path(khora_hir::Resolution::Item { module, name, .. }) => {
                 // A generic callee resolves to the specialization this call
                 // site asked for; a concrete one keeps its own name.
                 let symbol = self
@@ -64,15 +64,23 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // own, and the name means what it was written to mean.
                 let is_intrinsic = !self.be.is_defined(&symbol) && args.len() == 1;
                 let is_intrinsic2 = !self.be.is_defined(&symbol) && args.len() == 2;
+                // `attempt`, `within_deadline` and `contain_run` build an
+                // answer of std's type, so only std's: a program's own
+                // declaration of another type was read as std's. The checker
+                // refuses those first (`khora_types::unimplemented`); this is
+                // the second guard, for a caller that skipped it.
+                let core = module.segments() == ["std", "core"];
                 if is_intrinsic && name == "print" {
                     self.print(args[0], range)
                 } else if is_intrinsic && name == "assert" {
                     self.assert(args[0], range)
                 } else if is_intrinsic2 && name == "assert_that" {
                     self.assert_that(args[0], args[1], range)
-                } else if is_intrinsic && name == "attempt" {
+                } else if is_intrinsic && core && name == "attempt" {
                     self.attempt(site, args[0], range)
-                } else if is_intrinsic2 && name == "within_deadline" {
+                } else if is_intrinsic && core && name == "contain_run" {
+                    self.contain_run(site, args[0], range)
+                } else if is_intrinsic2 && core && name == "within_deadline" {
                     self.within_deadline(site, args[0], args[1], range)
                 } else {
                     self.call_named(&symbol, site, args, range)
@@ -375,8 +383,30 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
         }
 
+        // **A runtime trap a `std` body reaches by a foreign call**, in a
+        // frame that can leave: see [`RuntimeTrap`].
+        let foreign = signature.is_extern && !self.be.is_defined(name);
+        let runtime_trap = if foreign && self.can_leave_on_a_cancel() {
+            RuntimeTrap::of(name)
+        } else {
+            None
+        };
+        if let Some(RuntimeTrap::Returning(instead)) = runtime_trap {
+            let instead = match instead {
+                Never::Todo => self.be.rt.todo_contain,
+                Never::Bounds => self.be.rt.bounds_contain,
+                Never::RaceEmpty => self.be.rt.race_empty_contain,
+            };
+            self.be.builder.build_call(instead, &values, "").expect("a trap that can be contained");
+            self.leave_trapped();
+            return None;
+        }
+
         let call = self.be.builder.build_call(function, &values, "call").expect("a call");
         let result = call.try_as_basic_value().basic();
+        if let Some(RuntimeTrap::Answering) = runtime_trap {
+            self.leave_if_a_runtime_trap_was_contained();
+        }
 
         // A fallible callee handed back `{ raised, payload }`. Splitting it is
         // the branch `!` marks, and the error path is where this frame's
@@ -415,6 +445,54 @@ impl<'ctx> Lower<'_, 'ctx> {
             Type::Unit => self.be.unit_value(),
             _ => result.unwrap_or_else(|| self.be.unit_value()),
         })
+    }
+}
+
+/// What a foreign call into the runtime that can trap does inside a
+/// `contain`, so the frame calling it leaves rather than ending the process.
+///
+/// **The list is every runtime export a `std` body reaches that traps on a
+/// program's bug**, and nothing else: an entry here costs its callers a load
+/// and a branch, or a different call. An export that is not here and traps
+/// still ends the process, which is the safe direction.
+#[derive(Clone, Copy)]
+pub(super) enum RuntimeTrap {
+    /// A `-> Never` export, called through its returning twin instead: it
+    /// returns only when a `contain` takes the trap, and the frame leaves.
+    Returning(Never),
+    /// An export that answers a value, and inside a `contain` answers a
+    /// meaningless one and marks the trap; the frame leaves before it is
+    /// read ([`Lower::leave_if_a_runtime_trap_was_contained`]). The six
+    /// `Decimal` operations that can trap. The ones that cannot -- `high`,
+    /// `cmp`, `scale`, the `checked_` forms -- are not here, and pay nothing.
+    Answering,
+}
+
+/// The `-> Never` runtime traps `std` calls, each with a returning twin.
+#[derive(Clone, Copy)]
+pub(super) enum Never {
+    /// `khora_todo`, and `khora_todo_contain`.
+    Todo,
+    /// `khora_bounds_fail`, and `khora_bounds_contain`.
+    Bounds,
+    /// `khora_race_empty`, and `khora_race_empty_contain`.
+    RaceEmpty,
+}
+
+impl RuntimeTrap {
+    fn of(name: &str) -> Option<RuntimeTrap> {
+        match name {
+            "khora_todo" => Some(RuntimeTrap::Returning(Never::Todo)),
+            "khora_bounds_fail" => Some(RuntimeTrap::Returning(Never::Bounds)),
+            "khora_race_empty" => Some(RuntimeTrap::Returning(Never::RaceEmpty)),
+            "khora_decimal_add"
+            | "khora_decimal_sub"
+            | "khora_decimal_mul"
+            | "khora_decimal_divide"
+            | "khora_decimal_rescale"
+            | "khora_decimal_truncated" => Some(RuntimeTrap::Answering),
+            _ => None,
+        }
     }
 }
 

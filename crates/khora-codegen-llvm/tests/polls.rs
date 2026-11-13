@@ -532,16 +532,24 @@ fn main() -> Int {
 /// operations, and a duplicate and its release leave no trace a program can
 /// see. What is asserted is structural: `walk` has no inline duplicate at all
 /// (`Row` holds only machine words, so the only thing to count is `r`), and
-/// only the parameter's own releases remain -- one where the body ends and one
-/// where a cancellation at the back-edge leaves it. With the rule off there
-/// are two duplicates and five releases.
+/// only the parameter's own releases remain -- one where the body ends, one
+/// where a cancellation at the back-edge leaves it, and one on each trap exit
+/// (each `+` can trap, and a trap that a `contain` takes leaves the frame the
+/// way a cancellation does). With the rule off there are two duplicates and
+/// three more releases.
 #[test]
 fn a_field_read_or_write_through_a_binding_counts_nothing_on_the_record() {
     let body = function_ir("polls_fields", FIELDS, "walk");
     let dups = body.lines().filter(|l| l.starts_with("dup.bump")).count();
     let drops = body.lines().filter(|l| l.starts_with("drop.release")).count();
+    let traps = body.lines().filter(|l| l.contains("@khora_overflow_contain(")).count();
+    assert_eq!(traps, 3, "the three additions can each trap:\n{body}");
     assert_eq!(dups, 0, "a field access duplicated the record:\n{body}");
-    assert_eq!(drops, 2, "the parameter's releases, at the end and at a cancellation:\n{body}");
+    assert_eq!(
+        drops,
+        2 + traps,
+        "the parameter's releases, at the end, at a cancellation and at each trap:\n{body}"
+    );
 }
 
 /// Compiles `main` against the real `std` with its IR dumped, and returns the
@@ -746,11 +754,21 @@ pub fn main() -> () {
     let call = call.unwrap_or(0);
     let mut last_end = None;
     let mut rets = 0;
+    let mut block = "";
     for (at, line) in lines.iter().enumerate() {
+        if !line.starts_with(' ') {
+            if let Some((label, _)) = line.split_once(':') {
+                block = label;
+            }
+        }
         if line.contains("@khora_acquire_end(") {
             last_end = Some(at);
         }
-        if line.trim_start().starts_with("ret ") && at > call {
+        // A tagged function's returns all branch to one `t.return` block, so
+        // each branch to it is a way out, and its own `ret` is not another.
+        let leaves = line.trim_start().starts_with("br label %t.return")
+            || (line.trim_start().starts_with("ret ") && block != "t.return");
+        if leaves && at > call {
             rets += 1;
             assert!(
                 last_end.is_some_and(|e| e > call),
@@ -1055,4 +1073,49 @@ fn a_for_over_an_iterator_compiles_to_its_expansion() {
             );
         }
     }
+}
+
+/// A leaf that can trap, called from a hot loop: what a contained trap costs
+/// a caller that never traps.
+const CHECKED_LOOP: &str = "module t;
+fn mix(a: Int, b: Int) -> Int {
+  (a * 31 + b) % 1000003
+}
+
+fn arith(n: Int) -> Int {
+  let mut acc = 1;
+  let mut i = 0;
+  while i < n {
+    acc = mix(acc, i);
+    i = i + 1;
+  };
+  acc
+}
+
+fn main() -> Int { arith(10) }
+";
+
+/// **What this guards: a tag test on every trip of every loop that calls
+/// checked arithmetic.** A leaf that can trap returns `{ tag, answer }` so a
+/// `contain` can take the trap, and once it is inlined into a loop the tag
+/// is the constant 0 on every path but the trap's. If the leaf's returns
+/// reach LLVM as a phi of pairs, that constant never reaches the caller's
+/// test, and `xor; test; jne` stays on the hot path: 10% of a tight
+/// arithmetic loop. The trap exit has to reach the return as constants the
+/// optimizer can thread, so in the optimized loop **no `i32` tag is
+/// compared at all**, and the only way to the trap call is the overflow
+/// flag.
+#[test]
+fn a_checked_loop_tests_no_tag_on_its_hot_path() {
+    let body = function_ir_as("polls_checked_loop", CHECKED_LOOP, "arith", Profile::Release);
+    assert!(
+        body.contains("@khora_overflow_contain("),
+        "the inlined leaf can still be contained:\n{body}"
+    );
+    let tag_tests: Vec<&str> =
+        body.lines().filter(|l| l.contains("icmp") && l.contains(" i32 ")).collect();
+    assert!(
+        tag_tests.is_empty(),
+        "a tag test is left in the optimized loop: {tag_tests:?}\n{body}"
+    );
 }

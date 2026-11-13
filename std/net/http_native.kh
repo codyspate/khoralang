@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, Channel, ChildFailed, Eq, List, Map, Nursery, Option, Raised, Region, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, scoped};
+import std::core::{Array, Channel, ChildFailed, Eq, List, Map, Nursery, Option, Raised, Region, Result, Scope, SharedFn, Show, Split, acquire, attempt, bounded_nursery, contain_with, scoped};
 import std::permissions::{may_dial};
 import std::permissions::grants::{network};
 import std::net::socket::{SocketError, accept_on, connect_by, expired, invalid_handle, listen_on, receive, set_deadline, set_receive_timeout, shut, start, transmit};
@@ -1475,6 +1475,14 @@ pub type Router<'er> = {
   /// five functions that had no reason to carry a number. `Router::holding`
   /// is how it is set.
   pub limit: Int,
+  /// Whether each request runs inside `contain`.
+  ///
+  /// **What this prevents: one bad request ending every request the server
+  /// is serving.** With it, a handler that traps -- an overflow, an index
+  /// out of range, a `todo()` -- answers 500 and the requests beside it and
+  /// after it are answered. `Router::uncontained` turns it off, for a
+  /// service that would rather a supervisor restart it on the first bug.
+  pub contained: Bool,
 };
 
 /// Mounting is written `router |> Router::post(..)`, so the router is the
@@ -1489,7 +1497,7 @@ pub type Router<'er> = {
 /// made a REST service unwritable.
 impl Router {
   /// A router with no routes. The start of the pipeline.
-  pub fn new<'er>() -> Router<'er> { { routes: List::Nil, limit: default_limit() } }
+  pub fn new<'er>() -> Router<'er> { { routes: List::Nil, limit: default_limit(), contained: true } }
 
   /// The same router, holding at most `most` bytes per request.
   ///
@@ -1508,7 +1516,19 @@ impl Router {
   ///   |> Router::post("/documents", SharedFn::of(store))
   /// ```
   pub fn holding<'er>(router: Router<'er>, most: Int) -> Router<'er> {
-    { routes: router.routes, limit: most }
+    { routes: router.routes, limit: most, contained: router.contained }
+  }
+
+  /// The same router, with a trap in a handler ending the process.
+  ///
+  /// By default each request runs inside `contain`, so a trap in a handler
+  /// is that request's 500 and the server goes on. This turns that off: the
+  /// first trap ends the process with status 134, as it would with no
+  /// `contain` anywhere, and something outside -- a supervisor, an
+  /// orchestrator -- has to start it again. Worth choosing when a process
+  /// that has hit a bug should not be trusted to serve the next request.
+  pub fn uncontained<'er>(router: Router<'er>) -> Router<'er> {
+    { routes: router.routes, limit: router.limit, contained: false }
   }
 
   /// Mounts `handler` at `route` for `method`.
@@ -1537,6 +1557,7 @@ impl Router {
     {
       routes: List::Cons({ method: method, pattern: route, handler: handler }, router.routes),
       limit: router.limit,
+      contained: router.contained,
     }
   }
 
@@ -2049,12 +2070,15 @@ impl Router {
   /// a call per connection would cost a stack frame per connection on the
   /// thread running `main`, and an 8 MB stack holds about 130,000 of them.
   ///
-  /// **A trap inside a handler ends the server, not the request.** This said
-  /// the opposite, and `reference/traps.md` has always been right: there is no
-  /// per-fiber trap containment, the page says so in bold, and it tells you
-  /// not to design recovery around it. A doc comment promising the mechanism
-  /// that page forbids is the worst place for the two to disagree, because
-  /// this is the one a reader meets while writing the handler.
+  /// **A trap inside a handler is that request's 500.** Each request runs
+  /// inside `contain`, so an overflow, an index out of range or a division
+  /// by zero in a handler answers `500 Internal Server Error`, prints the
+  /// trap to stderr with `(contained; the fiber continues)`, and leaves every
+  /// other request -- in flight beside it, or arriving after -- to be
+  /// answered. Past the process's trap budget (1,000 in 60 seconds by
+  /// default, `KHORA_TRAP_BUDGET`) the next trap ends the process with 134,
+  /// so a bug a client can reach over and over still reaches a supervisor.
+  /// [`Router::uncontained`] ends the process on the first trap instead.
   ///
   /// A trap is for a bug -- an index out of bounds, an overflow, a division by
   /// zero. Failures a handler is meant to survive belong in its failure row,
@@ -2249,7 +2273,7 @@ impl Router {
         },
         Incoming::Arrived(request, keep) => {
           let headless = Method::same(request.method, Method::Head);
-          let response = Router::dispatch(router.routes, request)!;
+          let response = Router::response_to(router, request)!;
           if headless {
             Connection::reply_headless(connection, response, keep);
           } else {
@@ -2258,6 +2282,35 @@ impl Router {
           going = keep
         },
       }
+    }
+  }
+
+  /// What to send back for this request, inside `contain_with` unless the
+  /// router opted out.
+  ///
+  /// The request, not the connection, is the unit: a keep-alive connection
+  /// whose third request traps has answered the first two and goes on to the
+  /// fourth. A trap is printed to stderr with the fiber and `(contained; the
+  /// fiber continues)` and answered with a plain 500 that says nothing of what
+  /// went wrong -- the sentence can name an index or a value, which is not
+  /// the client's business.
+  ///
+  /// **`contain_with`, not `contain`, because the request is moved in.** A
+  /// `Request` holds `Map`s, which `contain`'s capture rule refuses; it is
+  /// sound here because the request is this call's alone and the caller
+  /// never reads it again, so a trap that leaves it half-written leaves it
+  /// where nothing looks. `routes` is captured, and is immutable.
+  fn response_to<'er>(router: Router<'er>, request: Request) -> Response
+    raises 'er
+  {
+    if router.contained {
+      let routes = router.routes;
+      match contain_with(request, fn r => Router::dispatch(routes, r)!)! {
+        Result::Ok(response) => response,
+        Result::Err(_) => Response::text(500, "Internal Server Error"),
+      }
+    } else {
+      Router::dispatch(router.routes, request)!
     }
   }
 

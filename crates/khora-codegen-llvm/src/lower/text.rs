@@ -365,7 +365,9 @@ impl<'ctx> Lower<'_, 'ctx> {
             .builder
             .build_int_truncate_or_bit_cast(valid, self.be.ctx.bool_type(), "utf8.bit")
             .expect("narrowing a C bool");
+        let held = self.hold_for_a_trap(&[(*array, object.into())]);
         self.guard(ok, "these bytes are not UTF-8, so they are not a String");
+        self.unhold(held);
 
         // The check split the block, so the addresses are recomputed on the
         // side of the branch that continues.
@@ -559,7 +561,9 @@ impl<'ctx> Lower<'_, 'ctx> {
             ("byte_length", []) => length.into(),
             ("byte", [_]) => {
                 let at = rest_values[0].into_int_value();
+                let held = self.hold_for_a_trap(&[(*subject, evaluated[0])]);
                 self.check_index(at, length);
+                self.unhold(held);
                 // Recomputed after the check, because the check split the block
                 // and the pointer above belongs to the one before it.
                 let bytes = runtime::byte_offset(
@@ -620,12 +624,17 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("copying a string's bytes");
                 array.into()
             }
-            ("slice", [_, _]) => self.string_slice(
-                object,
-                length,
-                rest_values[0].into_int_value(),
-                rest_values[1].into_int_value(),
-            ),
+            ("slice", [_, _]) => {
+                let held = self.hold_for_a_trap(&[(*subject, evaluated[0])]);
+                let sliced = self.string_slice(
+                    object,
+                    length,
+                    rest_values[0].into_int_value(),
+                    rest_values[1].into_int_value(),
+                );
+                self.unhold(held);
+                sliced
+            }
             ("find", [_, _]) => self.string_find(
                 object,
                 length,

@@ -74,6 +74,18 @@ pub const STOPPED_WHICH: u64 = khora_rt::STOPPED_WHICH as u64;
 /// and defined from the runtime's constant, which reads it at a fiber join.
 pub const NOTED_WHICH: u64 = khora_rt::NOTED_WHICH as u64;
 
+/// The `which` a contained trap travels under, from the trap site to the
+/// `contain` frame that turns it into a value. `catch` and `attempt` send it
+/// onward by name, as they send a cancellation. Defined from the runtime's
+/// constant, which decides when a trap is contained.
+pub const TRAPPED_WHICH: u64 = khora_rt::TRAPPED_WHICH as u64;
+
+/// The global a call that can trap inside the runtime is followed by a load
+/// of: non-zero only between a contained runtime trap and the code after the
+/// call that has to leave. `khora_rt::fibertrap` says why it is a word and
+/// not a call.
+pub const TRAP_PENDING_WORD: &str = "khora_trap_pending";
+
 /// The global every loop back-edge and every `!` loads before asking the
 /// runtime anything. `khora_rt::poll` says what is in it.
 pub const POLL_WORD: &str = "khora_poll";
@@ -408,6 +420,24 @@ pub struct Runtime<'ctx> {
     pub bounds_fail: FunctionValue<'ctx>,
     /// `_Noreturn void khora_overflow(const uint8_t *what, size_t len)`
     pub overflow: FunctionValue<'ctx>,
+    /// `void khora_overflow_contain(const uint8_t *what, size_t len)`: a trap
+    /// at a site that can leave. Returns only when a `contain` on this fiber
+    /// takes it, and the site then leaves under [`TRAPPED_WHICH`].
+    pub overflow_contain: FunctionValue<'ctx>,
+    /// `void khora_bounds_contain(int64_t index, int64_t len)`, likewise.
+    pub bounds_contain: FunctionValue<'ctx>,
+    /// `void khora_todo_contain(void)`, likewise.
+    pub todo_contain: FunctionValue<'ctx>,
+    /// `void khora_race_empty_contain(void)`, likewise.
+    pub race_empty_contain: FunctionValue<'ctx>,
+    /// `uint8_t khora_trap_taken(void)`: whether the runtime call just made
+    /// was a contained trap. Asked only behind [`TRAP_PENDING_WORD`].
+    pub trap_taken: FunctionValue<'ctx>,
+    /// `void khora_contain_enter(void)` and `khora_contain_exit`: the
+    /// `contain` frame, around its body.
+    pub contain_enter: FunctionValue<'ctx>,
+    /// See [`Runtime::contain_enter`].
+    pub contain_exit: FunctionValue<'ctx>,
     /// `void khora_unhandled(const uint8_t *name, size_t len)` — says which
     /// error left `main`. Returns, unlike its neighbors here: the program is
     /// ending correctly and this only says why.
@@ -712,6 +742,19 @@ impl<'ctx> Runtime<'ctx> {
                 void.fn_type(&[i64t.into(), i64t.into()], false),
             ),
             overflow: declare("khora_overflow", void.fn_type(&[ptr.into(), i64t.into()], false)),
+            overflow_contain: declare(
+                "khora_overflow_contain",
+                void.fn_type(&[ptr.into(), i64t.into()], false),
+            ),
+            bounds_contain: declare(
+                "khora_bounds_contain",
+                void.fn_type(&[i64t.into(), i64t.into()], false),
+            ),
+            todo_contain: declare("khora_todo_contain", void.fn_type(&[], false)),
+            race_empty_contain: declare("khora_race_empty_contain", void.fn_type(&[], false)),
+            trap_taken: declare("khora_trap_taken", i8t.fn_type(&[], false)),
+            contain_enter: declare("khora_contain_enter", void.fn_type(&[], false)),
+            contain_exit: declare("khora_contain_exit", void.fn_type(&[], false)),
             unhandled: declare(
                 "khora_unhandled",
                 void.fn_type(&[ptr.into(), i64t.into()], false),

@@ -100,6 +100,13 @@ pub(crate) enum Local {
     Foreign,
     /// A call to a backend intrinsic [`stop_free`] does not name.
     Intrinsic,
+    /// An operation that traps: checked arithmetic, a negation, a narrowing,
+    /// an index, a UTF-8 check. [`traps`] is the list.
+    ///
+    /// **A trap is a way out of the frame**, because inside a `contain` it
+    /// leaves the way a cancellation does, and a frame with no tag has no way
+    /// to say so: an untagged trap site is a trap no `contain` can take.
+    Trap,
 }
 
 /// The whole program's answer, by symbol.
@@ -201,6 +208,37 @@ fn stop_free(owner: &str, name: &str) -> bool {
     }
 }
 
+/// Whether the bodiless type operation `owner::name` can trap: what makes it
+/// a [`Local::Trap`] whether or not it is otherwise stop-free.
+///
+/// **Exactly the operations whose lowering calls the runtime's trap**, and no
+/// more: every one listed costs its callers a tag. `of` narrows an `Int` into
+/// a fixed width and `to_int` widens a `U64` that may not fit; the wrapping,
+/// bitwise and `checked_` forms cannot trap, and nor can `Float::to_int`,
+/// which saturates.
+fn traps(owner: &str, name: &str) -> bool {
+    if is_int_owner(owner) {
+        return matches!(name, "of" | "to_int");
+    }
+    if owner == crate::runtime::ARRAY_TYPE {
+        return matches!(name, "get" | "set");
+    }
+    match owner {
+        "Char" => matches!(name, "of" | "from_code"),
+        "String" => matches!(name, "byte" | "slice" | "from_bytes"),
+        _ => false,
+    }
+}
+
+/// Whether a built-in operator on operands of type `operand` can trap: the
+/// checked arithmetic on an integer, which the lowering does in place rather
+/// than dispatching. Division and remainder trap on zero as well.
+fn traps_as_an_operator(op: &khora_hir::body::BinOp, operand: &Type) -> bool {
+    use khora_hir::body::BinOp;
+    matches!(operand, Type::Int | Type::Fixed(_))
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem)
+}
+
 /// The bodiless free functions `std` declares for the backend to implement,
 /// known to have no cancellation point. The same rule as [`stop_free`]:
 /// anything not here is counted.
@@ -286,10 +324,12 @@ fn callee_reason(
         },
         // A constructor.
         Expr::Path(Resolution::Variant { .. }) => None,
+        Expr::Path(Resolution::TraitItem { owner, name }) if traps(owner, name) => Some(Local::Trap),
         Expr::Path(Resolution::TraitItem { owner, name }) => operation(owner, name),
         // A compile error elsewhere; counted rather than guessed at.
         Expr::Path(Resolution::Unsupported(_)) => Some(Local::Intrinsic),
         Expr::Field { base, name } => match receiver_owner(types.of(*base)) {
+            Some(owner) if traps(&owner, name) => Some(Local::Trap),
             Some(owner) => operation(&owner, name),
             None => Some(Local::ClosureCall),
         },
@@ -366,6 +406,21 @@ fn scan(
                 if args.iter().any(|a| matches!(types.of(*a), Type::Fn { .. })) {
                     local.insert(Local::HandsAClosure);
                 }
+            }
+            // Checked arithmetic the lowering does in place; an operator on
+            // a type that dispatches is an edge, above.
+            Expr::Binary { op, lhs, .. } if mono.callee(symbol, id).is_none() => {
+                if traps_as_an_operator(op, types.of(*lhs)) {
+                    local.insert(Local::Trap);
+                }
+            }
+            // A negation, the same, except of a literal: `-128` is one number.
+            Expr::Unary { op: khora_hir::body::UnOp::Neg, operand }
+                if mono.callee(symbol, id).is_none()
+                    && matches!(types.of(*operand), Type::Int | Type::Fixed(_))
+                    && !matches!(body.expr(*operand), Expr::Literal(_)) =>
+            {
+                local.insert(Local::Trap);
             }
             // No cancellation point of their own. Their operands are
             // expressions in the same arena and are scanned there; an
@@ -593,13 +648,40 @@ mod tests {
     fn a_leaf_with_no_loop_and_no_call_keeps_its_plain_return() {
         let answer = analyzed(
             "module main;
+fn same(a: Int, b: Int) -> Int { if a == b { a } else { b } }
+fn main() -> Int { same(1, 2) }
+",
+        );
+        assert!(!stops(&answer, "same"));
+        assert!(!stops(&answer, "main"), "calling only a leaf is not a reason");
+        assert!(!cyclic(&answer, "same"));
+    }
+
+    /// **A trap is a way out**, so a leaf that can trap carries a tag a
+    /// `contain` can take it out by; one that cannot trap does not.
+    #[test]
+    fn a_leaf_that_can_trap_stops_and_one_that_cannot_does_not() {
+        let answer = analyzed(
+            "module main;
+pub type Array<A>;
+impl<A> Array<A> { fn get(self, at: Int) -> A; fn length(self) -> Int; }
 fn add(a: Int, b: Int) -> Int { a + b }
+fn halve(a: Int) -> Int { a / 2 }
+fn flip(a: Int) -> Int { -a }
+fn minus_one() -> Int { -1 }
+fn first(xs: Array<Int>) -> Int { xs.get(0) }
+fn count(xs: Array<Int>) -> Int { Array::length(xs) }
 fn main() -> Int { add(1, 2) }
 ",
         );
-        assert!(!stops(&answer, "add"));
-        assert!(!stops(&answer, "main"), "calling only a leaf is not a reason");
-        assert!(!cyclic(&answer, "add"));
+        for name in ["add", "halve", "flip", "first"] {
+            assert!(answer.local[&symbol(&answer, name)].contains(&Local::Trap), "{name}");
+            assert!(stops(&answer, name), "{name}");
+        }
+        for name in ["minus_one", "count"] {
+            assert!(!stops(&answer, name), "{name} cannot trap");
+        }
+        assert!(stops(&answer, "main"), "a caller of something that can trap");
     }
 
     #[test]
@@ -645,13 +727,14 @@ fn main() -> Int { if even(4) { fib(10) } else { leaf() } }
         let answer = analyzed(
             "module main;
 fn apply(f: (Int) -> Int, x: Int) -> Int { f(x) }
-fn double(x: Int) -> Int { x * 2 }
-fn main() -> Int { apply(double, 3) }
+fn same(x: Int) -> Int { x }
+fn main() -> Int { apply(same, 3) }
 ",
         );
         assert!(answer.local[&symbol(&answer, "apply")].contains(&Local::ClosureCall));
         assert!(stops(&answer, "apply"));
-        assert!(!stops(&answer, "double"), "the function passed is a leaf");
+        // `x * 2` would trap, and a trap site is a way out of its own.
+        assert!(!stops(&answer, "same"), "the function passed is a leaf");
         assert!(stops(&answer, "main"));
     }
 

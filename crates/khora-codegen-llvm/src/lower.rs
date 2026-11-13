@@ -88,6 +88,7 @@ pub(crate) fn emit_function<'ctx>(
         incoming: HashMap::new(),
         aborted: false,
         asserts: 0,
+        plain_exit: None,
     };
 
     lower.allocate_slots();
@@ -180,6 +181,7 @@ pub(crate) fn emit_closure<'ctx>(
         incoming: HashMap::new(),
         aborted: false,
         asserts: 0,
+        plain_exit: None,
     };
 
     lower.allocate_slots();
@@ -495,6 +497,28 @@ struct Lower<'a, 'ctx> {
     /// the module is discarded anyway, and continuing would build IR against
     /// values that were never produced.
     aborted: bool,
+    /// The one block a tagged infallible function returns through, with a
+    /// phi for the tag and one for the answer. Made on the first return.
+    ///
+    /// **What this prevents: a tag test left on the hot path of every caller
+    /// that inlines a leaf that can trap.** Returning the `{ tag, answer }`
+    /// pair from each exit leaves LLVM to merge the returns into a phi *of
+    /// pairs*, and the caller's tag test reads a field of that phi. A phi
+    /// with two users (the tag and the answer) is one InstCombine will not
+    /// fold through, so the constant 0 the hot path returns never reaches
+    /// the branch, and `xor; test; jne` stays in the loop. Phis of the two
+    /// halves, and one pair built after them, fold to a phi of constants that
+    /// jump threading removes. Costs nothing: it is the block LLVM would
+    /// have made, built before rather than after.
+    plain_exit: Option<PlainExit<'ctx>>,
+}
+
+/// See [`Lower::plain_exit`].
+#[derive(Clone, Copy)]
+struct PlainExit<'ctx> {
+    block: inkwell::basic_block::BasicBlock<'ctx>,
+    which: inkwell::values::PhiValue<'ctx>,
+    answer: inkwell::values::PhiValue<'ctx>,
 }
 
 // One module per lowering responsibility. This was 5,872 lines in one file and
@@ -881,14 +905,23 @@ impl<'ctx> Lower<'_, 'ctx> {
             .builder
             .build_conditional_branch(asks, slow, carry_on)
             .expect("branching on the poll word");
+        self.weigh_as_never_taken(branch);
+        (slow, carry_on)
+    }
+
+    /// Weights a two-way branch so its first successor is never taken: the
+    /// other is the fall-through, and the first is laid out away from it.
+    ///
+    /// For every branch whose taken side is an exit -- a poll's slow path, a
+    /// trap -- so a hot loop's straight line is the path that does not leave.
+    pub(super) fn weigh_as_never_taken(&mut self, branch: inkwell::values::InstructionValue<'ctx>) {
         let weights = self.be.ctx.metadata_node(&[
             self.be.ctx.metadata_string("branch_weights").into(),
             self.be.ctx.i32_type().const_int(1, false).into(),
             self.be.ctx.i32_type().const_int(1 << 20, false).into(),
         ]);
         let kind = self.be.ctx.get_kind_id("prof");
-        branch.set_metadata(weights, kind).expect("weighting the poll branch");
-        (slow, carry_on)
+        branch.set_metadata(weights, kind).expect("weighting a branch");
     }
 
     /// Gives the scheduler a chance to take the worker back.

@@ -214,6 +214,24 @@ KHORA_BACKTRACE=1 ./build/myapp
 
 Off by default because capturing a backtrace costs every well-behaved program a page of stack on the way out, and the first thing anybody does with a bug is run it again. The frames are symbolized from the debug information the executable carries, so a build made without it gives addresses rather than names — still worth printing, since an address and the binary can be symbolized later. [Traps](/docs/reference/traps/) is the list of what counts as one; a failed `assert` does not.
 
+### `KHORA_TRAP_BUDGET`
+
+How many traps `contain` may take before the next one ends the program.
+
+**Default:** 1,000 in any 60 seconds, across the whole process.
+
+**Values:** `N`, a count per 60 seconds, or `N/SECONDS`, a count per window of that many seconds. Both are whole numbers, and the window is at least one second. `0` contains nothing, so every trap ends the program. Anything else stands for the default, and the program says so on stderr, once, the first time the budget is needed:
+
+```
+khora: KHORA_TRAP_BUDGET="3/0" is not a count (`N`) or a count over seconds (`N/SECONDS`), so the default stands: 1000 traps in any 60 s
+```
+
+```bash
+KHORA_TRAP_BUDGET=100/10 ./build/myapp
+```
+
+Past the budget, a trap that a [`contain`](/docs/reference/traps/#containing-a-trap-with-contain) would have taken ends the program with status 134 instead, after saying that the budget was spent. This includes a trap in a `Router` handler. A bug a client can reach over and over is a bug a supervisor should see, and without the budget it would be a stream of 500s instead.
+
 ### `KHORA_FIBERS`
 
 Which fiber backend the program runs on.

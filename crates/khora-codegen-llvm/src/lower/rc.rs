@@ -334,6 +334,33 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// Holds operands that are already evaluated across a check that can trap
+    /// after them, in a scope of their own; [`Self::unhold`] pops it.
+    ///
+    /// **What this prevents: a leak on every contained trap at an index or a
+    /// UTF-8 check.** [`Self::operands`] holds an operand only while a later
+    /// one is evaluated, and the bounds check of `Array::get`, `Array::set`,
+    /// `String::byte`, `String::slice` and `String::from_bytes` comes after
+    /// the last. The array or string is owned by nothing but this expression
+    /// there, and a trap that leaves the frame would leave it behind.
+    ///
+    /// Popped *without* releasing on the path that passes the check, because
+    /// the operation takes them on from there. Costs a release on the trap
+    /// exit only; a lent operand is not held, as in `operands`.
+    pub(super) fn hold_for_a_trap(&mut self, held: &[(ExprId, BasicValueEnum<'ctx>)]) -> usize {
+        self.scopes.push(Vec::new());
+        for (operand, value) in held {
+            self.hold_operand(*operand, *value);
+        }
+        self.scopes.len()
+    }
+
+    /// Pops what [`Self::hold_for_a_trap`] pushed, without releasing.
+    pub(super) fn unhold(&mut self, depth: usize) {
+        debug_assert_eq!(self.scopes.len(), depth, "a trap hold popped out of order");
+        self.scopes.pop();
+    }
+
     /// Releases and pops the innermost scope, on the path that reaches its end.
     pub(super) fn leave_scope(&mut self) {
         let scope = self.scopes.pop().unwrap_or_default();

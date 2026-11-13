@@ -105,6 +105,20 @@ pub const STOPPED_WHICH: u32 = u32::MAX - 2;
 /// through the compiler's routines, which know this tag.
 pub const NOTED_WHICH: u32 = u32::MAX - 3;
 
+/// The `which` a **contained trap** travels under, from the trap site to the
+/// nearest `contain` frame on the same fiber.
+///
+/// **What this prevents: a trap that a `catch` or `attempt` swallows.** A
+/// trap is a bug, not an error any row declared, so it travels a channel no
+/// program can name: reserved beside the other four and outside the range
+/// error-type ids come from. `catch` and `attempt` send it onward by name, as
+/// they send a cancellation, and only `std::core::contain` turns it into a
+/// value. It never crosses a fiber boundary: the runtime answers a trap with
+/// a return only while the trapping fiber has a `contain` frame of its own
+/// open (`crate::fibertrap`), and that frame is below every frame that sees
+/// this tag.
+pub const TRAPPED_WHICH: u32 = u32::MAX - 4;
+
 /// Whether fibers are coroutines on the scheduler rather than threads.
 ///
 /// Read once. A program that changed its mind halfway would have handles of

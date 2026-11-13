@@ -358,6 +358,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
     // Its rows are open both ways, as a test's error row is, and its return
     // type is nobody's: the errors that depend on them are not kept.
     let constants = khora_hir::body::const_bodies(db, file);
+    let in_std = crate::standard_library::is_std_file(db, file);
     let all = khora_hir::body::bodies(db, file)
         .iter()
         .map(|b| (b, false))
@@ -397,6 +398,9 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             types,
             body,
             signature: &signature,
+            scope: khora_hir::file_scope(db, file),
+            in_std,
+            called_directly: HashSet::new(),
             locals: HashMap::new(),
             exprs: HashMap::new(),
             instantiations: HashMap::new(),

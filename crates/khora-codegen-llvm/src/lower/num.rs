@@ -389,10 +389,13 @@ impl<'ctx> Lower<'_, 'ctx> {
     pub(super) fn guard(&mut self, ok: IntValue<'ctx>, what: &str) {
         let good = self.block("in.range");
         let bad = self.block("out.of.range");
-        self.be
+        let failed = self.be.builder.build_not(ok, "out.of.range.test").expect("negating a check");
+        let branch = self
+            .be
             .builder
-            .build_conditional_branch(ok, good, bad)
+            .build_conditional_branch(failed, bad, good)
             .expect("branching on a range check");
+        self.weigh_as_never_taken(branch);
         self.at(bad);
         self.trap(what);
         self.at(good);
@@ -488,24 +491,132 @@ impl<'ctx> Lower<'_, 'ctx> {
         literal_fits_width(text, bits, signed)
     }
 
-    /// Stops the program, saying what did not fit.
+    /// Stops the program, saying what did not fit -- or, inside a `contain`
+    /// on this fiber, leaves this frame the way a cancellation does.
     ///
     /// The tail of an overflow check and of a narrowing conversion, which want
     /// the same three instructions and the same wording.
+    ///
+    /// **In a frame with a way out, the runtime decides.** It returns from
+    /// `khora_overflow_contain` only when a `contain` frame on this fiber
+    /// takes the trap (`khora_rt::fibertrap` has the whole condition), and the
+    /// frame then leaves under [`runtime::TRAPPED_WHICH`], releasing what it
+    /// owns. Everywhere else the call ends the process with the same message
+    /// `khora_overflow` prints. A frame with no way out -- one `can_stop`
+    /// pruned, which a trap site prevents -- keeps the old call.
     pub(super) fn trap(&mut self, what: &str) {
-        let text = self
-            .be
-            .builder
-            .build_global_string_ptr(what, "overflow.what")
-            .expect("naming the operation")
-            .as_pointer_value();
-        let len = self.be.ctx.i64_type().const_int(what.len() as u64, false);
+        if self.can_leave_on_a_cancel() {
+            let (text, len) = self.sentence(what);
+            let report = self.be.rt.overflow_contain;
+            self.be
+                .builder
+                .build_call(report, &[text.into(), len.into()], "")
+                .expect("reporting an overflow");
+            self.leave_trapped();
+            return;
+        }
+        self.trap_fatal(what);
+    }
+
+    /// Stops the program, saying `what`, whatever is on the stack.
+    ///
+    /// **For a compiler invariant**, never a program's own bug: a `catch`
+    /// reached by a tag the checker ruled out. Containing one would carry on
+    /// past a miscompile.
+    pub(super) fn trap_fatal(&mut self, what: &str) {
+        let (text, len) = self.sentence(what);
         let report = self.be.rt.overflow;
         self.be
             .builder
             .build_call(report, &[text.into(), len.into()], "")
             .expect("reporting an overflow");
         self.be.builder.build_unreachable().expect("sealing after an overflow");
+    }
+
+    /// `what`, as the pointer and length the runtime's trap entries take.
+    fn sentence(&mut self, what: &str) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+        let text = self
+            .be
+            .builder
+            .build_global_string_ptr(what, "overflow.what")
+            .expect("naming the operation")
+            .as_pointer_value();
+        (text, self.be.ctx.i64_type().const_int(what.len() as u64, false))
+    }
+
+    /// Leaves this frame under [`runtime::TRAPPED_WHICH`], the way a
+    /// cancellation leaves it: what the frame owns is released, its regions
+    /// run their finalizers, and a `catch` on the way sends the tag onward.
+    pub(super) fn leave_trapped(&mut self) {
+        let which = self.be.ctx.i32_type().const_int(runtime::TRAPPED_WHICH, false);
+        let none = self.be.ctx.i64_type().const_zero();
+        self.leave_with(which, none);
+    }
+
+    /// After a runtime call that answers a meaningless value when a
+    /// `contain` takes its trap: leaves before anything reads it.
+    ///
+    /// **One relaxed load and a branch never taken**, not a call: the
+    /// process-wide [`runtime::TRAP_PENDING_WORD`] is zero except between a
+    /// contained runtime trap and this check, and only then is
+    /// `khora_trap_taken` asked whether the trap was this thread's call. A
+    /// call per `Decimal` operation to ask was 13% of a `Decimal::add` loop.
+    pub(super) fn leave_if_a_runtime_trap_was_contained(&mut self) {
+        let i64t = self.be.ctx.i64_type();
+        let word = match self.be.module.get_global(runtime::TRAP_PENDING_WORD) {
+            Some(global) => global,
+            None => {
+                let global = self.be.module.add_global(i64t, None, runtime::TRAP_PENDING_WORD);
+                global.set_linkage(inkwell::module::Linkage::External);
+                global
+            }
+        };
+        let loaded = self
+            .be
+            .builder
+            .build_load(i64t, word.as_pointer_value(), "trap.pending")
+            .expect("reading the pending-trap word")
+            .into_int_value();
+        let load = loaded.as_instruction().expect("a load is an instruction");
+        load.set_atomic_ordering(AtomicOrdering::Monotonic).expect("a relaxed load");
+        load.set_alignment(8).expect("a word-aligned load");
+        let pending = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::NE, loaded, i64t.const_zero(), "trap.any")
+            .expect("testing the pending-trap word");
+        let ask = self.block("trap.ask");
+        let leave = self.block("trap.leave");
+        let carry_on = self.block("trap.no");
+        let branch = self
+            .be
+            .builder
+            .build_conditional_branch(pending, ask, carry_on)
+            .expect("branching on the pending-trap word");
+        self.weigh_as_never_taken(branch);
+
+        self.at(ask);
+        let taken = self.be.rt.trap_taken;
+        let flag = self
+            .be
+            .builder
+            .build_call(taken, &[], "trap.taken")
+            .expect("asking whether the call trapped")
+            .try_as_basic_value()
+            .basic()
+            .expect("a flag")
+            .into_int_value();
+        let mine = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::NE, flag, self.be.ctx.i8_type().const_zero(), "trap.mine")
+            .expect("testing the flag");
+        self.be.builder.build_conditional_branch(mine, leave, carry_on).expect("on the flag");
+
+        self.at(leave);
+        self.leave_trapped();
+
+        self.at(carry_on);
     }
 
     /// Arithmetic that stops the program rather than wrapping.
@@ -549,10 +660,12 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         let bad = self.block("overflow");
         let good = self.block("in.range");
-        self.be
+        let branch = self
+            .be
             .builder
             .build_conditional_branch(overflowed, bad, good)
             .expect("branching on the overflow flag");
+        self.weigh_as_never_taken(branch);
 
         self.at(bad);
         self.trap(what);

@@ -1,5 +1,59 @@
 # What a trap does to a process
 
+## 0. Superseded: cancellation is the unwinder (decided 2026-10-13)
+
+**§3 and §4 below are superseded, and §5's decision with them.** §3's premise
+was that there is no unwinder. There is now: every function that can reach a
+cancellation point returns a tag, every call site branches on it, and the
+branch releases exactly what the frame owns (`leave_with` -> `unwind_to` in
+`lower/failure.rs`), including evaluated operands, reuse tokens and regions,
+whose finalizers run. And §6 point 4 happened: `Shared::update` became
+transactional for a tag, so a change function that comes back with one
+changes nothing and frees the lock.
+
+So a trap uses that unwinder. A trap site in a frame that has a tag calls
+`khora_*_contain`, which returns only if the fiber has an open `contain` frame
+(`std::core::contain`), is not running a finalizer, and the process trap
+budget (`KHORA_TRAP_BUDGET`, default 1,000 per 60 s) is not spent; otherwise
+it ends the process with 134 as before. When it returns, the frame leaves
+under `TRAPPED_WHICH` like a cancellation, and `contain` turns that tag into
+`Err(Trapped)`. `can_stop` counts a trap site as a way out, which is where
+the cost lives. `contain`'s closure has `Fiber::spawn`'s capture rule
+(`Crossing::Contain`), so nothing a trap could leave half-written outlives
+it except inside `Shared`.
+
+What §5 obliged still holds: an uncontained trap ends the process, and every
+contained one is printed to stderr with the fiber and `(contained; the fiber
+continues)`. The budget is what keeps "a bug degrades to 500s forever" from
+replacing "a crash a supervisor sees".
+
+**`Router` contains each request** through `std::core::contain_with`, which
+moves the `Request` into the body instead of capturing it: every `Request`
+holds `Map`s with `mut` fields, which `contain`'s capture rule refuses. It is
+sound because nothing reads the request after the call. The checker has no
+last-use facts (Perceus does, after checking), so `contain_with` is callable
+only from `std::` modules; a public version with a use-after-move refusal is
+the follow-up. `contain_run`, the primitive under both, is lowered only for
+`std::core`'s declaration, so a program cannot declare its own and get
+containment with no rule.
+
+**Running out of stack stays outside `contain`**, and keeps the platform's
+status (SIGSEGV, 139 from a shell on Unix) with "the stack ran out": the
+guard-page handler runs with no stack to unwind on.
+
+**Cost, measured** (`perf stat -e instructions:u`, release, per iteration,
+against the base): checked arithmetic in a loop 20 -> 21 (the tag test is
+gone after inlining once every return of a tagged function goes through one
+block with a phi per half; the one instruction is register allocation),
+`Array::get` 13 -> 13, `Decimal::add` 170 -> 175 (+2.9%: `lea; mov; test;
+jne` on the pending-trap word after each trapping call, and a `jmp` in
+`khora_decimal_add` to the epilogue it shares with the contained return; the
+prototype's +26 came from a TLS call after every Decimal operation). A
+`Router` request: about +1.3% on both backends (the scheduler's
+run-to-run spread is about as large, so 0 to +1.4% there).
+
+## The original argument, kept for its reasoning
+
 `docs/roadmap.md` 12.8 says containing a trap at a fiber boundary is "a real
 argument that has not been had". This is that argument, and its answer.
 

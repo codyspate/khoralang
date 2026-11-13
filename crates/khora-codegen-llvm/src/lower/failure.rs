@@ -292,7 +292,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     let none = self.be.ctx.i64_type().const_zero();
                     self.leave_with(tag, none);
                 } else {
-                    self.trap("a cancellation reached a frame that cannot be canceled; this is a compiler bug");
+                    self.trap_fatal("a cancellation reached a frame that cannot be canceled; this is a compiler bug");
                 }
                 self.at(go_on);
                 text
@@ -583,6 +583,119 @@ impl<'ctx> Lower<'_, 'ctx> {
         )
     }
 
+    /// The `contain_run` intrinsic behind `std::core::contain`: run a
+    /// computation on this fiber with a `contain` frame open, and make a trap
+    /// in it a `None`.
+    ///
+    /// **The frame is the runtime's count, and it is closed before anything
+    /// is read.** `khora_contain_enter` raises this fiber's depth, so a trap
+    /// site under the body returns from the runtime and leaves its frame under
+    /// [`runtime::TRAPPED_WHICH`] (`khora_rt::fibertrap`). The body's frames
+    /// each release what they own on the way, as a cancellation's do. The
+    /// call's tag is taken whole, `khora_contain_exit` runs on every way out
+    /// of the call -- there is no branch between the two -- and only then is
+    /// the tag read: an answer is `Some`, the trap tag is `None`, and anything
+    /// else (an error, a cancellation, a failed assertion) leaves as itself.
+    ///
+    /// What it costs, past the call: two runtime calls for the frame and the
+    /// `Option`, which is an allocation where the answer is not held inline.
+    pub(super) fn contain_run(&mut self, site: ExprId, body: ExprId, range: TextRange) -> Flow<'ctx> {
+        let Some(shape) = FnShape::of(self.types.of(body)) else {
+            return self.fail("`contain` takes a function to run", range);
+        };
+        let option_ty = self.types.of(site).clone();
+        let held = shape.ret.clone();
+        let given = self.operands(&[body])?;
+        let closure = given[0].into_pointer_value();
+
+        let enter = self.be.rt.contain_enter;
+        self.be.builder.build_call(enter, &[], "").expect("opening a contain frame");
+        let (raw, fallible) =
+            self.invoke_closure_unsplit(site, body, closure, &shape, Vec::new(), range)?;
+        let exit = self.be.rt.contain_exit;
+        self.be.builder.build_call(exit, &[], "").expect("closing a contain frame");
+
+        let pair = raw.expect("a tagged closure returns a pair").into_struct_value();
+        let which = self
+            .be
+            .builder
+            .build_extract_value(pair, 0, "contain.which")
+            .expect("reading the tag")
+            .into_int_value();
+        let half = self
+            .be
+            .builder
+            .build_extract_value(pair, 1, "contain.half")
+            .expect("reading the answer");
+
+        let answered = self.block("contain.answered");
+        let not = self.block("contain.not");
+        let trapped = self.block("contain.trapped");
+        let onward = self.block("contain.onward");
+        let merge = self.block("contain.end");
+        let zero = self.be.ctx.i32_type().const_zero();
+        let ok = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, which, zero, "contain.ok")
+            .expect("testing the tag");
+        self.be.builder.build_conditional_branch(ok, answered, not).expect("branching on the tag");
+
+        self.at(answered);
+        let word = if fallible {
+            half.into_int_value()
+        } else {
+            match &held {
+                Type::Unit | Type::Never => self.be.ctx.i64_type().const_zero(),
+                _ => self.be.to_word(half),
+            }
+        };
+        let answered_end = self.here();
+        self.br(merge);
+
+        self.at(not);
+        let trap_tag = self.be.ctx.i32_type().const_int(runtime::TRAPPED_WHICH, false);
+        let is_trap = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, which, trap_tag, "contain.is.trap")
+            .expect("testing for a contained trap");
+        self.be
+            .builder
+            .build_conditional_branch(is_trap, trapped, onward)
+            .expect("branching on a trap");
+
+        self.at(trapped);
+        self.br(merge);
+
+        // An error, a cancellation or a failed assertion: handed on as itself.
+        self.at(onward);
+        let payload =
+            if fallible { half.into_int_value() } else { self.be.ctx.i64_type().const_zero() };
+        self.leave_with(which, payload);
+
+        self.at(merge);
+        let present = self
+            .be
+            .builder
+            .build_phi(self.be.ctx.bool_type(), "contain.present")
+            .expect("a phi");
+        let yes = self.be.ctx.bool_type().const_int(1, false);
+        let no = self.be.ctx.bool_type().const_zero();
+        present.add_incoming(&[(&yes, answered_end), (&no, trapped)]);
+        let words = self.be.builder.build_phi(self.be.ctx.i64_type(), "contain.word").expect("a phi");
+        let none = self.be.ctx.i64_type().const_zero();
+        words.add_incoming(&[(&word, answered_end), (&none, trapped)]);
+        // The scope `invoke_closure_unsplit` opened for the closure.
+        self.leave_scope();
+        self.option_of_word(
+            present.as_basic_value().into_int_value(),
+            words.as_basic_value().into_int_value(),
+            &held,
+            &option_ty,
+        )
+    }
+
     /// The `attempt` intrinsic: run a computation and make its failure a value.
     ///
     /// The tagged return is already "an error or a value"; this is the same
@@ -646,11 +759,11 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.store_result(slot, object.into());
         self.br(merge);
 
-        // Two things travel this channel without being errors, and `catch`
-        // already routes both of them back to propagating — see
-        // `lower_catch`, where a `_` arm sends `CANCELED_WHICH` and
-        // `FAILED_WHICH` to `onward` by name. `attempt` is the *other* total
-        // handler and it did not, which is a hole in the same rule:
+        // Three things travel this channel without being errors, and `catch`
+        // routes each of them back to propagating -- see `lower_catch`, where
+        // a `_` arm sends `CANCELED_WHICH`, `FAILED_WHICH` and
+        // `TRAPPED_WHICH` to `onward` by name. `attempt` is the *other* total
+        // handler, and one that missed a tag would be a hole in the same rule:
         // `effect-runtime.md` §6 says a cancellation cannot be swallowed
         // because nothing a program writes names it, and `attempt` names
         // nothing at all.
@@ -681,6 +794,20 @@ impl<'ctx> Lower<'_, 'ctx> {
             .builder
             .build_or(is_cancel, is_abort, "attempt.escapes")
             .expect("either of the two");
+        // A contained trap is a bug on its way to its `contain`, not a
+        // failure of the body's: an `Err` built from it would hold a null
+        // typed as the body's error, which is the swallow described above.
+        let trapped = self.be.ctx.i32_type().const_int(runtime::TRAPPED_WHICH, false);
+        let is_trap = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, which, trapped, "attempt.trapped")
+            .expect("testing for a contained trap");
+        let not_an_error = self
+            .be
+            .builder
+            .build_or(not_an_error, is_trap, "attempt.escapes.trap")
+            .expect("any of the three");
         self.be
             .builder
             .build_conditional_branch(not_an_error, escape, erred)
@@ -913,22 +1040,48 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// Returns `{ which, answer }` from an infallible function that carries a
     /// cancellation tag. `answer` is at the function's own answer type, or an
     /// `i64` zero for `()`.
+    ///
+    /// Every such return branches to one exit block (see
+    /// [`super::Lower::plain_exit`] for the failure that prevents).
     pub(super) fn return_plain_tagged(&mut self, which: IntValue<'ctx>, answer: BasicValueEnum<'ctx>) {
-        let shape = self.plain_pair_type();
-        let value = self
-            .be
-            .builder
-            .build_insert_value(shape.get_undef(), which, 0, "t.which")
-            .expect("setting the tag");
-        let value = self
-            .be
-            .builder
-            .build_insert_value(value, answer, 1, "t.answer")
-            .expect("setting the answer");
-        self.be
-            .builder
-            .build_return(Some(&value.into_struct_value()))
-            .expect("returning a tagged answer");
+        let exit = match self.plain_exit {
+            Some(exit) => exit,
+            None => {
+                let from = self.here();
+                let shape = self.plain_pair_type();
+                let answer_type = shape.get_field_type_at_index(1).expect("an answer field");
+                let block = self.block("t.return");
+                self.at(block);
+                let which_phi = self
+                    .be
+                    .builder
+                    .build_phi(self.be.ctx.i32_type(), "t.which.in")
+                    .expect("a phi for the tag");
+                let answer_phi = self.be.builder.build_phi(answer_type, "t.answer.in").expect("a phi for the answer");
+                let value = self
+                    .be
+                    .builder
+                    .build_insert_value(shape.get_undef(), which_phi.as_basic_value(), 0, "t.which")
+                    .expect("setting the tag");
+                let value = self
+                    .be
+                    .builder
+                    .build_insert_value(value, answer_phi.as_basic_value(), 1, "t.answer")
+                    .expect("setting the answer");
+                self.be
+                    .builder
+                    .build_return(Some(&value.into_struct_value()))
+                    .expect("returning a tagged answer");
+                self.at(from);
+                let exit = super::PlainExit { block, which: which_phi, answer: answer_phi };
+                self.plain_exit = Some(exit);
+                exit
+            }
+        };
+        let from = self.here();
+        exit.which.add_incoming(&[(&which, from)]);
+        exit.answer.add_incoming(&[(&answer, from)]);
+        self.br(exit.block);
     }
 
     /// The ordinary way out of a tagged infallible function: its answer, with

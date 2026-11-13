@@ -2,20 +2,18 @@
 
 //! What a trap inside a request handler does to the server.
 //!
-//! **The documentation makes a strong claim and nothing was holding it.** The
-//! reference says a trap in a handler ends the process rather than the
-//! request, and the HTTP cookbook now tells people to run more than one
-//! instance because of it. That claim is the reason a service is architected
-//! one way rather than another, and until this file there was no test of it
-//! anywhere: every trap test ran a program with no server in it, and every
-//! server test used handlers that did not trap.
+//! **What this guards: one bad request ending every request the server is
+//! serving.** `Router` runs each request inside `std::core::contain`, so a
+//! handler that overflows answers 500, the trap is printed to stderr with
+//! `(contained; the fiber continues)`, and the requests beside it -- and the
+//! ones after it -- are answered. `Router::uncontained` is the opt-out, and
+//! with it the first trap ends the process with 134, which is the other half
+//! of the claim and the reason a supervisor still matters.
 //!
-//! It is worth testing in both directions, because the code around a handler
-//! reads as though the claim were false. `serve_connection` wraps the handler
-//! in `catch { _ => 500 }`, which looks like a request-level safety net and is
-//! one — for `raises`. A trap does not unwind, so it goes straight past.
-//! Asserting only that the trap kills the server would leave the other half
-//! untested and would pass just as well if the wrapper caught nothing at all.
+//! Tested in both directions, because each half alone passes against a
+//! server that does the other: a 500 for `/trap` says nothing unless a
+//! router that opted out dies, and a death says nothing unless the default
+//! survives. `/raise` is the control for both: a raise is a 500 either way.
 
 use crate::harness;
 
@@ -36,10 +34,17 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 /// to bind and reporting a connection reset -- a server bug that is not one.
 ///
 /// The ports in use, so the next one is chosen by looking in one place:
-/// 18732 `http`, 18733 `http_layers`, 18734 here, 18736 and 18737
+/// 18732 `http`, 18733 `http_layers`, 18734 and 18740 to 18742 here, 18736 and 18737
 /// `http_accept`, 18738 and 18739 `long_inputs`, 18847 `tls_cancel`, 18961
 /// and 18962 `net_cancel`, 18971 and 18972 `tls`, 47821 `reference`.
 const PORT: u16 = 18734;
+
+/// The server that opted out, on a port of its own so the two tests can run
+/// in either order.
+const UNCONTAINED_PORT: u16 = 18740;
+
+/// The load test's, one per fiber backend.
+const LOAD_PORTS: [(&str, u16); 2] = [("threads", 18741), ("scheduler", 18742)];
 
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -65,14 +70,17 @@ fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceF
     out
 }
 
-/// Three routes: one that answers, one that raises, one that traps.
+/// Four routes: one that answers, one that raises, one that traps, and one
+/// that answers slowly, so a trap can arrive while others are in flight.
 ///
 /// `/raise` is the control. It fails in the way the language has a mechanism
 /// for, so the router turns it into a 500 and the server carries on — which is
 /// what makes `/trap` a claim about traps rather than about handlers that go
-/// wrong in general.
+/// wrong in general. `@ROUTER@` is `Router::new()` or, for the opt-out,
+/// `Router::new() |> Router::uncontained`.
 const SERVER: &str = "module demo::main;
 import std::core::{ChildFailed, Option, SharedFn};
+import std::clock::{Clock};
 import std::net::http::{HttpError, Request, Response, Router};
 
 fn print(value: String);
@@ -81,6 +89,12 @@ pub type Broke = | Deliberately;
 
 fn fine(_req: Request) -> Response {
   Response::text(200, \"fine\")
+}
+
+/// Answers after 300 ms, holding a fiber in a handler meanwhile.
+fn slow(_req: Request) -> Response {
+  with { clock: Clock::real() } { clock.sleep(300) };
+  Response::text(200, \"slow\")
 }
 
 /// Fails the way the language provides for, so the wrapper answers 500.
@@ -101,8 +115,9 @@ fn trapping(req: Request) -> Response {
 }
 
 pub fn main() raises HttpError + ChildFailed {
-  Router::new()
+  @ROUTER@
     |> Router::get(\"/fine\", SharedFn::of(fine))
+    |> Router::get(\"/slow\", SharedFn::of(slow))
     |> Router::get(\"/raise\", SharedFn::of(fn req => raising(req)! catch { _ => Response::text(500, \"raised\") }))
     |> Router::get(\"/trap\", SharedFn::of(trapping))
     |> Router::listen(@PORT@)!
@@ -120,15 +135,20 @@ impl Drop for Server {
     }
 }
 
-fn start() -> Server {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("http_trap_server");
+fn start(router: &str, port: u16) -> Server {
+    start_on(router, port, "threads")
+}
+
+/// [`start`], on the fiber backend `fibers`.
+fn start_on(router: &str, port: u16, fibers: &str) -> Server {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("http_trap_server_{port}"));
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "server.exe" } else { "server" });
     let _ = std::fs::remove_file(&exe);
 
     let db = KhoraDatabase::new();
-    let main = SERVER.replace("@PORT@", &PORT.to_string());
+    let main = SERVER.replace("@PORT@", &port.to_string()).replace("@ROUTER@", router);
     let root = SourceRoot::new(&db, sources(&db, &dir, &main));
     if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
         let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
@@ -136,6 +156,7 @@ fn start() -> Server {
     }
 
     let mut child = std::process::Command::new(&exe)
+        .env("KHORA_FIBERS", fibers)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -161,9 +182,9 @@ fn start() -> Server {
     Server { child }
 }
 
-fn connect() -> Option<std::net::TcpStream> {
+fn connect(port: u16) -> Option<std::net::TcpStream> {
     for _ in 0..100 {
-        if let Ok(socket) = std::net::TcpStream::connect(("127.0.0.1", PORT)) {
+        if let Ok(socket) = std::net::TcpStream::connect(("127.0.0.1", port)) {
             socket.set_read_timeout(Some(DEADLINE)).expect("a read deadline");
             socket.set_write_timeout(Some(DEADLINE)).expect("a write deadline");
             return Some(socket);
@@ -175,8 +196,8 @@ fn connect() -> Option<std::net::TcpStream> {
 
 /// Sends one request on a fresh connection and returns whatever came back,
 /// which for a server that died mid-answer is nothing.
-fn ask(path: &str) -> String {
-    let Some(mut socket) = connect() else { return String::new() };
+fn ask(port: u16, path: &str) -> String {
+    let Some(mut socket) = connect(port) else { return String::new() };
     let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     if socket.write_all(request.as_bytes()).is_err() {
         return String::new();
@@ -192,51 +213,134 @@ fn ask(path: &str) -> String {
 
 /// The whole claim, in the order the reader of the documentation meets it.
 ///
-/// One test rather than three: each step depends on the server still being in
-/// the state the step before left it in, and the last step deliberately ends
-/// the process. Splitting them would need three servers on three ports to
-/// assert one thing each about the same server.
+/// One test rather than several: each step depends on the server still being
+/// in the state the step before left it in.
 #[test]
-fn a_trap_in_a_handler_ends_the_server_and_a_raise_does_not() {
-    let mut server = start();
+fn a_trap_in_a_handler_answers_500_and_the_server_goes_on() {
+    let mut server = start("Router::new()", PORT);
 
     // --- an ordinary request is answered
-    let ok = ask("/fine");
+    let ok = ask(PORT, "/fine");
     assert!(ok.starts_with("HTTP/1.1 200"), "expected an answer, got {ok:?}");
     assert!(ok.ends_with("fine"), "expected the body, got {ok:?}");
 
-    // --- a raise is contained at the request, which is the control
-    //
-    // If this were the trap's behavior too, the assertion below would be
-    // testing nothing about traps.
-    let raised = ask("/raise");
+    // --- a raise is a 500, which is the control
+    let raised = ask(PORT, "/raise");
     assert!(raised.starts_with("HTTP/1.1 500"), "a raise is a 500, got {raised:?}");
-    let after = ask("/fine");
+
+    // --- a trap is a 500 too, with requests in flight beside it
+    let slow: Vec<_> = (0..8).map(|_| std::thread::spawn(|| ask(PORT, "/slow"))).collect();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let trapped = ask(PORT, "/trap");
     assert!(
-        after.starts_with("HTTP/1.1 200"),
-        "and the server is still serving afterwards, got {after:?}"
+        trapped.starts_with("HTTP/1.1 500"),
+        "a trap in a handler is that request's 500: {trapped:?}"
     );
+    for (i, waiting) in slow.into_iter().enumerate() {
+        let answer = waiting.join().expect("a client thread");
+        assert!(
+            answer.starts_with("HTTP/1.1 200") && answer.ends_with("slow"),
+            "request {i}, in flight when the trap came, is answered: {answer:?}"
+        );
+    }
 
-    // --- a trap is not
-    let trapped = ask("/trap");
+    // --- and so is everything after it
+    for _ in 0..3 {
+        let after = ask(PORT, "/fine");
+        assert!(after.starts_with("HTTP/1.1 200"), "the server goes on serving: {after:?}");
+    }
     assert!(
-        !trapped.starts_with("HTTP/1.1 200"),
-        "the handler cannot have answered: {trapped:?}"
+        server.child.try_wait().expect("asking about the server").is_none(),
+        "the process is still alive"
     );
 
-    let status = server.child.wait().expect("the server should have ended");
-    assert_eq!(
-        status.code(),
-        Some(134),
-        "a trap in a handler ends the process with a trap's status, not the request"
-    );
-
+    // The trap is not silent: it is on stderr, with what the server goes on
+    // to do. Read once the server is stopped, so the pipe has an end.
+    let _ = server.child.kill();
+    let _ = server.child.wait();
     let mut said = String::new();
     if let Some(mut stderr) = server.child.stderr.take() {
         let _ = stderr.read_to_string(&mut said);
     }
     assert!(
-        said.contains("overflowed"),
-        "and it says what happened on the way out: {said:?}"
+        said.contains("Int addition overflowed") && said.contains("(contained; the fiber continues)"),
+        "the contained trap is reported on stderr: {said:?}"
     );
+}
+
+/// `Router::uncontained` is the opt-out: the first trap ends the process with
+/// a trap's status, as it does with no `contain` anywhere.
+#[test]
+fn an_uncontained_router_ends_the_server_on_a_trap() {
+    let mut server = start("(Router::new() |> Router::uncontained)", UNCONTAINED_PORT);
+
+    let ok = ask(UNCONTAINED_PORT, "/fine");
+    assert!(ok.starts_with("HTTP/1.1 200"), "expected an answer, got {ok:?}");
+    let raised = ask(UNCONTAINED_PORT, "/raise");
+    assert!(raised.starts_with("HTTP/1.1 500"), "a raise is still a 500, got {raised:?}");
+
+    let trapped = ask(UNCONTAINED_PORT, "/trap");
+    assert!(!trapped.starts_with("HTTP/1.1"), "nothing answers the trap: {trapped:?}");
+
+    let status = server.child.wait().expect("the server should have ended");
+    assert_eq!(status.code(), Some(134), "a trap ends an uncontained server with 134");
+
+    let mut said = String::new();
+    if let Some(mut stderr) = server.child.stderr.take() {
+        let _ = stderr.read_to_string(&mut said);
+    }
+    assert!(said.contains("overflowed"), "and says what happened: {said:?}");
+    assert!(!said.contains("contained;"), "and did not contain it: {said:?}");
+}
+
+/// **What this guards: one request's trap ending the forty beside it.** Forty
+/// `/slow` requests are parked in their sleep when a `/trap` arrives, and
+/// every one of them must still answer 200 on both fiber backends: the
+/// trap's unwind runs on one fiber while the others are suspended, and on
+/// the scheduler they share workers with it. Then 200 more traps, mixed with
+/// good requests from eight client threads, and the server still answers.
+///
+/// The shape of the design round's `load.py`, smaller for a test run.
+#[test]
+fn forty_requests_in_flight_survive_a_trapping_request() {
+    for (fibers, port) in LOAD_PORTS {
+        let mut server = start_on("Router::new()", port, fibers);
+
+        let slow: Vec<_> = (0..40).map(|_| std::thread::spawn(move || ask(port, "/slow"))).collect();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let trapped = ask(port, "/trap");
+        assert!(trapped.starts_with("HTTP/1.1 500"), "{fibers}: the trap is a 500: {trapped:?}");
+        let answered = slow
+            .into_iter()
+            .map(|waiting| waiting.join().expect("a client thread"))
+            .filter(|answer| answer.starts_with("HTTP/1.1 200") && answer.ends_with("slow"))
+            .count();
+        assert_eq!(answered, 40, "{fibers}: every request in flight is answered");
+
+        let clients: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let mut wrong = Vec::new();
+                    for _ in 0..25 {
+                        let bad = ask(port, "/trap");
+                        if !bad.starts_with("HTTP/1.1 500") {
+                            wrong.push(format!("trap: {bad:?}"));
+                        }
+                        let good = ask(port, "/fine");
+                        if !(good.starts_with("HTTP/1.1 200") && good.ends_with("fine")) {
+                            wrong.push(format!("fine: {good:?}"));
+                        }
+                    }
+                    wrong
+                })
+            })
+            .collect();
+        let wrong: Vec<String> =
+            clients.into_iter().flat_map(|c| c.join().expect("a client thread")).collect();
+        assert!(wrong.is_empty(), "{fibers}: {} wrong answers, first {:?}", wrong.len(), wrong.first());
+        assert!(
+            server.child.try_wait().expect("asking about the server").is_none(),
+            "{fibers}: alive after 201 contained traps"
+        );
+    }
 }

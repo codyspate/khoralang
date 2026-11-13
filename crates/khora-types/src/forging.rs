@@ -144,22 +144,39 @@ fn internal(module: &str) -> Option<&'static Internal> {
 /// the path says nothing about which files are `std`, and the harness wrote
 /// every file it compiles. A driver that runs untrusted code declares.
 ///
-/// Costs a `canonicalize` of the file's path, paid only by a file that names
-/// an internal module -- in practice the two or three `std` files that do.
-fn is_standard_library(db: &dyn Db, file: SourceFile) -> bool {
+/// **Fails closed when something was resolved.** A file whose real path
+/// cannot be worked out is not `std`'s, and with no standard library found
+/// nothing is; see [`really_under`].
+///
+/// Costs a `canonicalize` of the file's path each time it is asked. The
+/// internal-module rule asks only for a file that names an internal module;
+/// the trap rules ask twice for every file in the compilation (whether it may
+/// call `contain_with`, and whether its bodiless functions may be
+/// intrinsics). Measured on `khora check` over `examples/` and `std`: within
+/// run-to-run noise, so it is not cached.
+pub(crate) fn is_standard_library(db: &dyn Db, file: SourceFile) -> bool {
     let by_module_line = || crate::imports::package_of(db, file) == "std";
     if khora_db::dependency_files(db).is_none() {
         return by_module_line();
     }
     static STD: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    let std_dir = STD.get_or_init(|| khora_db::standard_library().map(|d| d.canonicalize().unwrap_or(d)));
-    match std_dir {
-        Some(dir) => {
-            let path = file.path(db);
-            path.canonicalize().unwrap_or_else(|_| path.clone()).starts_with(dir)
-        }
-        None => by_module_line(),
-    }
+    let std_dir = STD.get_or_init(|| khora_db::standard_library().and_then(|d| d.canonicalize().ok()));
+    really_under(std_dir.as_deref(), file.path(db))
+}
+
+/// Whether `path`, with every link followed and every `..` gone, is inside
+/// `dir`, itself already canonical.
+///
+/// **What this prevents: a spelling being taken for a place.**
+/// `Path::starts_with` compares components and keeps `..`, so
+/// `<std>/../../elsewhere` starts with `<std>`. A path that cannot be
+/// canonicalized -- one whose real path is longer than `PATH_MAX`, reached
+/// through short links, still opens -- is therefore **not** inside, rather
+/// than compared as written. No directory (the standard library was not
+/// found, or its own path could not be canonicalized) has nothing inside it.
+fn really_under(dir: Option<&std::path::Path>, path: &std::path::Path) -> bool {
+    let Some(dir) = dir else { return false };
+    path.canonicalize().is_ok_and(|real| real.starts_with(dir))
 }
 
 /// Each place in `file` that names a [`STD_INTERNAL`] module, unless `file`
@@ -273,4 +290,36 @@ pub(crate) fn forged_capability_errors(db: &dyn Db, file: SourceFile) -> Vec<Hir
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::really_under;
+
+    /// A spelling that leaves the directory with `..` is outside it, whether
+    /// or not anything is there: one that exists canonicalizes to its real
+    /// place, and one that does not cannot be canonicalized and is outside
+    /// every directory. The second stands in for the `PATH_MAX` case, which
+    /// fails `canonicalize` the same way while still starting, as written,
+    /// with `dir`.
+    #[test]
+    fn a_path_is_under_a_directory_only_by_where_it_really_is() {
+        // Both directories are made here, so the test writes nowhere it does
+        // not own: a CI runner's temporary directory is `/tmp`, whose parent
+        // is not writable.
+        let base = std::env::temp_dir().join(format!("khora_really_under_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("std");
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let base = base.canonicalize().expect("its real path");
+        let dir = base.join("std");
+        let inside = dir.join("really_under_probe.kh");
+        std::fs::write(&inside, "").expect("a file inside");
+        assert!(really_under(Some(&dir), &inside));
+        std::fs::write(base.join("really_under_outside.kh"), "").expect("a file beside the directory");
+        assert!(!really_under(Some(&dir), &dir.join("..").join("really_under_outside.kh")));
+        assert!(!really_under(Some(&dir), &dir.join("..").join("really_under_no_such_file.kh")));
+        assert!(!really_under(None, &inside));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

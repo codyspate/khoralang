@@ -32,12 +32,14 @@
 //!
 //! Not `std`: its bodiless functions are the intrinsics, which code
 //! generation writes at each call site, and a program cannot add one. A
-//! program's own bodiless `print`, `assert`, `assert_that` or `attempt` is
-//! one too when it is called with the arguments code generation lowers by
-//! name -- `examples/core_demo` declares its own `print` -- and only then. So
-//! is a bodiless method on a type whose operations code generation lowers by
-//! the type's name (`Ptr`, `String`, `Array`, the integers, ...), whichever
-//! module declares the `impl`; those are left to the build.
+//! program's own bodiless `print`, `assert` or `assert_that` is one too when
+//! it is declared as std's is and called with the arguments code generation
+//! lowers by name -- `examples/core_demo` declares its own `print` -- and only
+//! then; its own `attempt`, `within_deadline` or `contain_run` never is (see
+//! `lowered_by_name`). So is a bodiless method on a type whose operations
+//! code generation lowers by the type's name (`Ptr`, `String`, `Array`, the
+//! integers, ...), whichever module declares the `impl`; those are left to
+//! the build.
 
 use std::collections::HashSet;
 
@@ -55,10 +57,10 @@ use crate::{BodyTypes, Type};
 pub fn unimplemented_functions(db: &dyn Db, root: SourceRoot) -> HashSet<(ModulePath, String)> {
     let mut out = HashSet::new();
     for file in root.files(db) {
-        let Some(module) = khora_hir::item_map(db, *file).module.clone() else { continue };
-        if module.segments().first().is_some_and(|first| first == "std") {
+        if crate::standard_library::is_std_file(db, *file) {
             continue;
         }
+        let Some(module) = khora_hir::item_map(db, *file).module.clone() else { continue };
         for decl in khora_db::parse(db, *file).source_file().decls() {
             match decl {
                 ast::Decl::Fn(f) if !f.is_extern() && f.body().is_none() => {
@@ -233,14 +235,27 @@ fn lowered_by_owner(head: &str) -> bool {
 }
 
 /// Whether `id` is the callee of a call code generation lowers itself, by
-/// name, whatever declares it -- and with the arguments it can lower.
+/// name -- and with the arguments it can lower.
 ///
-/// Matches `lower/calls.rs`, `lower/text.rs` and `lower/failure.rs`: `print`
-/// of an `Int`, `Float`, `Bool` or `String`; `assert` of a `Bool`;
-/// `assert_that` of a `Bool` and a `String`; `attempt` of a function;
-/// `within_deadline` of an `Int` and a function. Anything else with those
-/// names is an ordinary call to a function with no body, which the build
-/// refuses.
+/// Matches `lower/calls.rs`, `lower/text.rs` and `lower/failure.rs`. Reached
+/// only for a function declared bodiless *outside* the standard library
+/// ([`unimplemented_functions`] leaves std's files out, through
+/// [`crate::standard_library::is_std_file`]), so the question here is which
+/// program declarations may stand in for an intrinsic:
+///
+/// - **`print`, `assert` and `assert_that`: when the declaration says what
+///   std's does** -- one `Int`, `Float`, `Bool` or `String` (with a `String`
+///   after it, for `assert_that`) in, nothing out, no row. A test fixture
+///   that compiles without std declares `fn print(value: Int);`, and so does
+///   `examples/core_demo`; that is the same function under the same
+///   contract. One that declares `-> String` is not: code generation lowers
+///   the call as std's and the program reads its `()` as a string, which
+///   crashed.
+/// - **`attempt`, `within_deadline` and `contain_run`: never.** Each one's
+///   answer is built by code generation to std's type, and a program's own
+///   declaration of another type -- `-> Result<A, String>` over an error
+///   that is not a `String` -- read one value's bytes as another's. A program
+///   that wants one of these imports std's.
 fn lowered_by_name(body: &Body, types: &BodyTypes, id: ExprId) -> bool {
     let Expr::Path(Resolution::Item { name, .. }) = body.expr(id) else { return false };
     let Some(args) = body.exprs().find_map(|(_, expr)| match expr {
@@ -250,12 +265,17 @@ fn lowered_by_name(body: &Body, types: &BodyTypes, id: ExprId) -> bool {
         return false;
     };
     let ty = |n: usize| types.of(args[n]);
+    let answers_nothing = matches!(
+        types.of(id),
+        Type::Fn { ret, requires, raises, .. }
+            if **ret == Type::Unit && crate::is_empty_row(requires) && crate::is_empty_row(raises)
+    );
     match (name.as_str(), args.len()) {
-        ("print", 1) => matches!(ty(0), Type::Int | Type::Float | Type::Bool | Type::Str),
-        ("assert", 1) => matches!(ty(0), Type::Bool),
-        ("assert_that", 2) => matches!((ty(0), ty(1)), (Type::Bool, Type::Str)),
-        ("attempt", 1) => matches!(ty(0), Type::Fn { .. }),
-        ("within_deadline", 2) => matches!((ty(0), ty(1)), (Type::Int, Type::Fn { .. })),
+        ("print", 1) => {
+            answers_nothing && matches!(ty(0), Type::Int | Type::Float | Type::Bool | Type::Str)
+        }
+        ("assert", 1) => answers_nothing && matches!(ty(0), Type::Bool),
+        ("assert_that", 2) => answers_nothing && matches!((ty(0), ty(1)), (Type::Bool, Type::Str)),
         _ => false,
     }
 }

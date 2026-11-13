@@ -978,6 +978,7 @@ mod unimplemented;
 mod reporting;
 mod map;
 mod queries;
+mod standard_library;
 mod syntax;
 mod unresolved;
 

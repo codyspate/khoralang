@@ -18,6 +18,7 @@ impl<'a> Checker<'a> {
     ) -> Type {
         // Checked after the arguments, because a lambda's implicit captures are
         // only known once it has been inferred.
+        let guarded = self.guarded_item(callee);
         let certifying = match self.body.expr(callee) {
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
                 // `Fibers::spawn(crew, body)` starts `body` on a fiber of its
@@ -31,18 +32,33 @@ impl<'a> Checker<'a> {
                     None
                 }
             }
-            _ => None,
+            _ => match guarded {
+                Some(Guarded::Contain) => Some(super::sharing::Crossing::Contain),
+                // The body (the second argument) has `contain`'s capture
+                // rule, and the value is moved in. Only the standard library
+                // may call it; see its definition for why.
+                Some(Guarded::ContainWith) => {
+                    self.refuse_contain_with_outside_std(range);
+                    Some(super::sharing::Crossing::Contain)
+                }
+                // Called by `contain` and `contain_with` with the body they
+                // were handed, and the rule was checked where *they* were
+                // called.
+                Some(Guarded::ContainRun) | None => None,
+            },
         };
+        self.called_directly.insert(callee);
         self.refuse_a_literal_limit_below_one(callee, args);
         if let Some(crossing) = certifying {
             let result = self.infer_call_inner(callee, args, hint, range);
-            let body: &[ExprId] = match self.body.expr(callee) {
-                Expr::Path(khora_hir::Resolution::TraitItem { owner, .. }) if owner == FIBERS_TYPE => {
+            let body: &[ExprId] = match (self.body.expr(callee), guarded) {
+                (Expr::Path(khora_hir::Resolution::TraitItem { owner, .. }), _) if owner == FIBERS_TYPE => {
                     match args.get(1) {
                         Some(&work) if self.forwards_a_nursery_spawn(work) => &[],
                         _ => args.get(1..).unwrap_or(&[]),
                     }
                 }
+                (_, Some(Guarded::ContainWith)) => args.get(1..).unwrap_or(&[]),
                 _ => args,
             };
             self.check_spawnable(body, crossing, range);
@@ -75,6 +91,91 @@ impl<'a> Checker<'a> {
             }
         }
         result
+    }
+
+    /// Which of `std::core`'s guarded functions `callee` names, by its
+    /// definition rather than its spelling.
+    ///
+    /// **What this prevents: a rule walked around by renaming.** The checks on
+    /// `contain` and `contain_with` matched the name written at the call, so
+    /// `import std::core::{contain as guard}` and then `guard(..)` was an
+    /// ordinary call: no capture rule, and a closure that wrote a captured
+    /// `Array` and then trapped left it half-written where the code after it
+    /// read it. An import records what the defining module calls the thing,
+    /// and that is what is asked here.
+    pub(super) fn guarded_item(&self, callee: ExprId) -> Option<Guarded> {
+        let Expr::Path(khora_hir::Resolution::Item { module, name, kind: khora_hir::ItemKind::Function }) =
+            self.body.expr(callee)
+        else {
+            return None;
+        };
+        let declared = self
+            .scope
+            .origin(name)
+            .filter(|origin| origin.module == *module)
+            .map_or(name.as_str(), |origin| origin.name.as_str());
+        if module.segments() != ["std", "core"] {
+            return None;
+        }
+        match declared {
+            "contain" => Some(Guarded::Contain),
+            "contain_with" => Some(Guarded::ContainWith),
+            "contain_run" => Some(Guarded::ContainRun),
+            _ => None,
+        }
+    }
+
+    /// Refuses `contain`, `contain_with` or `contain_run` named anywhere but
+    /// as the callee of a call.
+    ///
+    /// **What this prevents: the capture rule skipped by a function value.**
+    /// The rule is checked at the call, where the body is in hand. `let c =
+    /// contain;` and then `c(..)`, or `run(contain, ..)`, made the call
+    /// through a local the checker knows only by its type, and containment
+    /// ran with no rule at all. Tracking where a function value flows would
+    /// close that too, at the cost of an analysis this one rule does not
+    /// need: these are called, not passed, and nothing in the standard
+    /// library takes one as a value.
+    pub(super) fn refuse_guarded_as_a_value(&mut self, at: ExprId) {
+        if self.called_directly.contains(&at) {
+            return;
+        }
+        let Some(which) = self.guarded_item(at) else { return };
+        let name = which.name();
+        self.error(
+            format!(
+                "`{name}` is called directly, so its body's captures can be checked; it \
+                 cannot be used as a value. Call `{name}(..)` where the body is written"
+            ),
+            self.body.range(at),
+        );
+    }
+
+    /// Refuses a call to `std::core::contain_with` from outside the standard
+    /// library.
+    ///
+    /// **What this prevents: a contained trap leaving a value half-written
+    /// where the program reads it.** `contain_with` moves its value into the
+    /// body without `contain`'s capture rule, which is sound only when
+    /// nothing reads that value after the call -- and the checker cannot
+    /// tell whether a binding is used again. The standard library's one
+    /// caller, `Router`, is argued sound at the definition; a program's call
+    /// is not, so it has `contain` and its rule.
+    ///
+    /// "The standard library" is [`crate::standard_library::is_std_file`],
+    /// the package resolver's answer: a package that names a module
+    /// `std::..`, or a dependency named `std`, is refused too.
+    fn refuse_contain_with_outside_std(&mut self, range: TextRange) {
+        if self.in_std {
+            return;
+        }
+        self.error(
+            "`contain_with` is the standard library's own: nothing checks that the value it \
+             is handed is not read after a trap left it half-written. Use `contain`, whose \
+             body may capture only what a trap cannot leave half-written"
+                .to_string(),
+            range,
+        );
     }
 
     /// Refuses `bounded_nursery(0, ..)`, `Fibers::bounded(-1)` and `race([])`.
@@ -1142,6 +1243,7 @@ impl<'a> Checker<'a> {
                 self.type_of_trait_item(at, &owner, &name)
             }
             khora_hir::Resolution::Item { name, .. } => {
+                self.refuse_guarded_as_a_value(at);
                 // Each mention gets its own copy of the signature, so two calls
                 // to the same generic function do not constrain each other.
                 match self.types.signatures.get(name).cloned() {
@@ -1163,6 +1265,25 @@ impl<'a> Checker<'a> {
                 }
             }
             khora_hir::Resolution::Unsupported(_) => Type::Unknown,
+        }
+    }
+}
+
+/// The functions of `std::core` whose rules are checked where they are
+/// called: see [`Checker::guarded_item`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Guarded {
+    Contain,
+    ContainWith,
+    ContainRun,
+}
+
+impl Guarded {
+    fn name(self) -> &'static str {
+        match self {
+            Guarded::Contain => "contain",
+            Guarded::ContainWith => "contain_with",
+            Guarded::ContainRun => "contain_run",
         }
     }
 }

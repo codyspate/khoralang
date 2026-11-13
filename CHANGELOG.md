@@ -65,6 +65,19 @@ it will behave differently now.
   ```
 
   `examples/ledger_service` and the TechEmpower peer do this in `main`.
+- `Router` contains each request. A trap in a handler -- an overflow, an
+  index out of range, a division by zero, a `todo()` -- answers
+  `500 Internal Server Error` and the server goes on serving the requests
+  beside it and after it. Before this release a trap ended the process
+  with status 134, taking every request in flight with it. The trap is printed to stderr with
+  the fiber and `(contained; the fiber continues)`. Past the trap budget
+  (1,000 contained traps in 60 seconds, `KHORA_TRAP_BUDGET`) the next trap
+  still ends the process with 134. A service that wants the old behavior,
+  so a supervisor restarts it on the first bug, writes
+  `Router::new() |> Router::uncontained`. `Router` gained a `contained`
+  field; code that builds a `Router` record literally rather than through
+  `Router::new()` adds `contained: true`.
+
 - Listening needs a grant under `default = "deny"`. `std::net::socket::listen_on`
   checks `[permissions] listen` before it makes a socket and raises
   `SocketError::Denied("0.0.0.0:<port>")` for a port the manifest does not
@@ -671,6 +684,36 @@ it will behave differently now.
   wasm32-unknown-unknown` succeeds.
 
 ### Added
+
+- `Router::uncontained`: a router on which a trap in a handler ends the
+  process with 134 instead of answering 500. See Breaking.
+
+- `std::core::contain(body) -> Result<A, Trapped>`: a trap inside `body` on
+  the same fiber -- an overflow, an index out of range, a division by zero, a
+  narrowing that does not fit, a `todo()`, a `Decimal` that does not fit --
+  answers `Err(Trapped { message })` instead of ending the process. The frames
+  it abandons are left the way a cancellation leaves them: what they owned is
+  released, their regions run their finalizers, and a `Shared::update` or
+  `modify` whose change function trapped keeps the cell's old value. The trap
+  is still printed to stderr, with `(contained; the fiber continues)`. An
+  error raised in `body` comes out as an error and a cancellation as a
+  cancellation. Still fatal, with 134: a trap on a fiber with no `contain` of
+  its own (a spawned child does not inherit one), a trap in a finalizer, the
+  runtime's fatal errors, and any trap once the process has contained 1,000 in
+  60 seconds (`KHORA_TRAP_BUDGET=N` or `N/SECONDS`). `body` may not capture a
+  `mut` record, an `Array` or a `Region`, as with `Fiber::spawn`. Nothing is
+  contained on WebAssembly. [Traps](/docs/reference/traps/#containing-a-trap-with-contain)
+  has the whole of it.
+
+  **What it costs.** A place that can trap is a way out of its function, so
+  a function with checked arithmetic or an index returns a tag its callers
+  test. Measured in user instructions per iteration against 0.4, release:
+  a loop calling a small checked-arithmetic function 20 -> 21 (the tag test
+  is optimized away; the one instruction is a register move), `Array::get`
+  in a loop 13 -> 13, and `Decimal::add` in a loop 170 -> 175 (+2.9%: four
+  instructions checking whether the call trapped, and one jump inside
+  `Decimal::add`). A `Router` request costs about 1.3% more, on both
+  backends.
 
 - `[permissions] listen`: the ports a program may listen on. An entry is a
   port (`8080`), a range (`8000-8099`, starting at 1), `0` for a port the

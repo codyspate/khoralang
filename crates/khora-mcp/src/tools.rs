@@ -165,6 +165,12 @@ fn check(source: &str) -> Result<String> {
     let snippet = SourceFile::new(&db, std::path::PathBuf::from("snippet.kh"), source.to_string());
     files.push(snippet);
     SourceRoot::new(&db, files);
+    // **Declared, and empty: the snippet is no dependency's, and std is
+    // found by where it is.** Left undeclared, the checker falls back on
+    // `module` lines, and a snippet naming itself `std::..` was let call
+    // `contain_with` and declare its own `attempt` -- "This compiles" about
+    // code the build refuses.
+    khora_db::DependencyFiles::new(&db, Vec::new());
 
     let parse = khora_db::parse(&db, snippet);
     if !parse.errors().is_empty() {
