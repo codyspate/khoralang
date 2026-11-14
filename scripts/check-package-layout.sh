@@ -43,7 +43,10 @@ case "$given" in
         stage=$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -n 1)
         ;;
     *.zip)
-        if unzip -l "$given" | grep -q "$member\$"; then
+        # Windows' `Compress-Archive` writes `\` between path parts (the
+        # released 0.4.0 zip does), and `Expand-Archive` reads either, so
+        # the listing is compared with `/` in place of `\`.
+        if unzip -Z1 "$given" | tr '\\' '/' | grep -q "/$member\$"; then
             echo "ok    listed: $member"
             exit 0
         fi
