@@ -105,16 +105,15 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # **Rust is pinned, not `stable`, in every workflow.** Rust 1.100 (2026-11-12)
-      # moved test executables out of `target/<profile>/deps/` (Cargo's new
-      # build-dir layout), and tests here find `khora` by walking up from the
-      # test binary (`khora-cli/tests/doc.rs`, the LLVM test harness). Its
-      # Windows standard library also needs
-      # `WakeByAddressSingle`, which the runtime archive's link line lacks. Both
-      # are fixed separately; move the pin then, all six places at once.
+      # **Rust is pinned, not `stable`, in every workflow**, so a new Rust is a
+      # change somebody makes rather than one a run picks up halfway. Rust 1.100
+      # (2026-11-12) arrived that way and broke every branch: Cargo moved test
+      # executables out of `target/<profile>/deps/`, and its Windows standard
+      # library needs `WakeByAddressSingle` (`synchronization.lib`). Both are
+      # handled. Move the pin in all six places at once, through branch CI.
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned, not `stable`: see ci.yml
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -184,7 +183,7 @@ jobs:
       # the bitcode in an archive written by Rust's LLVM 23.
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned, not `stable`: see ci.yml
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
           components: llvm-tools, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
