@@ -195,6 +195,192 @@ fn main() -> Int {{
     );
 }
 
+/// **A very large or very small double is written, not `"?"`.** The runtime
+/// wrote every double without an exponent, so `1e300` took 301 bytes and
+/// `5e-324` 327, and `Float::to_string`, which allows 32, answered `"?"`;
+/// `Json::of_float` then answered `None` for a finite number, and a derived
+/// `Encode` wrote `null`.
+///
+/// Plain from `0.000001` up to below `1e21`, an exponent outside, as
+/// JavaScript writes them. Made by arithmetic, because Khora has no exponent
+/// in its literals; three hundred multiplications by ten land one unit in the
+/// last place above `1e300`, and the text says so.
+#[test]
+fn a_float_too_large_or_small_for_plain_digits_is_written_with_an_exponent() {
+    let out = run(
+        "text_float_exponent",
+        &format!(
+            "{HEAD}
+fn power(n: Int) -> Float {{
+  let mut out = 1.0;
+  let mut left = n;
+  while left > 0 {{ out = out * 10.0; left = left - 1 }};
+  out
+}}
+
+fn main() -> Int {{
+  let huge = power(300);
+  print(Float::to_string(huge));
+  print(Float::to_string(1.0 / power(7)));
+  print(Float::to_string(1.0 / power(6)));
+  print(Float::to_string(power(21)));
+  print(Float::to_string(power(20)));
+  let mut tiny = 1.0;
+  let mut halvings = 0;
+  while halvings < 1074 {{ tiny = tiny / 2.0; halvings = halvings + 1 }};
+  print(Float::to_string(tiny));
+  print(Float::to_string(0.0 - tiny));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        "1.0000000000000002e300\n1e-7\n0.000001\n1e21\n100000000000000000000\n5e-324\n-5e-324\n0\n",
+        "the smallest double is 2^-1074, which is 5e-324 to the shortest digits that read back"
+    );
+}
+
+/// The text `Float::to_string` writes for `value`, by its documented rule:
+/// Rust's shortest digits, plain from `1e-6` up to below `1e21`, an exponent
+/// outside. `khora_float_text`'s own unit test holds the runtime to the same
+/// rule, so this is the test's copy of it and not a second definition.
+fn written(value: f64) -> String {
+    let magnitude = value.abs();
+    if magnitude != 0.0 && magnitude.is_finite() && !(1e-6..1e21).contains(&magnitude) {
+        format!("{value:e}")
+    } else {
+        format!("{value}")
+    }
+}
+
+/// **Every finite double survives `Float::to_string` and `Float::of_string`
+/// unchanged**: 10,000 random bit patterns, read and written back by the
+/// program, and the text compared. Shortest text is one per double, so the
+/// same text back is the same bits back.
+///
+/// **What it prevents: a reader that is one unit in the last place off.**
+/// `of_string` built the value digit by digit in doubles and scaled it by a
+/// power of ten built the same way, rounding at every step, so `1.118` read
+/// as `1.1179999999999999` -- about four doubles in five, measured on the
+/// shortest text of random ones -- and `5e-324` read as zero. A JSON document
+/// decoded and encoded again came back with different numbers in it.
+///
+/// The named values are the edges: the smallest subnormal, the largest
+/// subnormal, the smallest normal, the largest finite double, and the
+/// numbers that were reported misread. Infinity and `NaN` are left out, as
+/// `of_string` refuses both names by design; a bit pattern that is one of
+/// them is skipped rather than counted.
+#[test]
+fn every_double_reads_back_through_its_own_text() {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut texts: Vec<String> = Vec::new();
+    while texts.len() < 10_000 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let value = f64::from_bits(state);
+        if value.is_finite() {
+            texts.push(written(value));
+        }
+    }
+    for named in [
+        5e-324,
+        f64::from_bits(0x000f_ffff_ffff_ffff),
+        2.2250738585072014e-308,
+        f64::MAX,
+        -f64::MAX,
+        1.118,
+        1.122,
+        0.1,
+        0.3,
+        1e23,
+        9007199254740993.0,
+        123456789012345678901234567890.0,
+        -0.0,
+    ] {
+        texts.push(written(named));
+    }
+    let joined = texts.join(" ");
+    let out = run(
+        "text_float_round_trip",
+        &format!(
+            "{HEAD}
+fn main() -> Int {{
+  let mut wrong = 0;
+  let mut read = 0;
+  let mut texts = String::split_whitespace(\"{joined}\");
+  let mut going = true;
+  while going {{
+    match texts {{
+      List::Nil => going = false,
+      List::Cons(text, rest) => {{
+        read = read + 1;
+        match Float::of_string(text) {{
+          Option::None => {{ print(\"refused \" + text); wrong = wrong + 1 }},
+          Option::Some(value) => {{
+            let back = Float::to_string(value);
+            if back != text {{ print(text + \" came back as \" + back); wrong = wrong + 1 }};
+          }},
+        }};
+        texts = rest;
+      }},
+    }}
+  }};
+  khora_print_int(read);
+  khora_print_int(wrong);
+  0
+}}
+"
+        ),
+    );
+    let count = texts.len();
+    let lines: Vec<&str> = out.lines().collect();
+    let shown: Vec<&str> = lines.iter().take(12).copied().collect();
+    assert_eq!(
+        lines[lines.len().saturating_sub(2)..],
+        [count.to_string().as_str(), "0"],
+        "read {count} texts; these did not come back:\n  {}",
+        shown.join("\n  ")
+    );
+}
+
+/// **`Float::of_string` takes what it took and refuses what it refused**,
+/// read through the runtime now: Rust's parser underneath takes `inf`, `nan`,
+/// `+1`, `.5` and `1.`, and each of those is checked away before it is asked.
+/// Each accepted row prints the double read; each refused one, `none`.
+#[test]
+fn of_string_keeps_its_grammar() {
+    let accepted = ["0", "-0", "007", "1.5", "1e3", "1E+3", "1e-3", "1e400", "-1e400"];
+    let refused =
+        ["", "-", "+1", ".5", "1.", "1e", "1e+", "inf", "-inf", "Infinity", "nan", "NaN", "1_0", "0x10", " 1", "1 ", "1.2.3"];
+    let mut calls = String::new();
+    for text in accepted.iter().chain(refused.iter()) {
+        calls.push_str(&format!("  print(read(\"{text}\"));\n"));
+    }
+    let out = run(
+        "text_float_grammar",
+        &format!(
+            "{HEAD}
+fn read(text: String) -> String {{
+  match Float::of_string(text) {{ Option::Some(value) => Float::to_string(value), Option::None => \"none\" }}
+}}
+
+fn main() -> Int {{
+{calls}  0
+}}
+"
+        ),
+    );
+    let want: Vec<&str> = ["0", "-0", "7", "1.5", "1000", "1000", "0.001", "inf", "-inf"]
+        .into_iter()
+        .chain(refused.iter().map(|_| "none"))
+        .collect();
+    assert_eq!(out.lines().collect::<Vec<_>>(), want);
+}
+
 // --- sorting ----------------------------------------------------------------
 
 const SHOW: &str = "

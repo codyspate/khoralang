@@ -29,6 +29,13 @@ impl<'a> Ctx<'a> {
                 None => self.add_pat(Pat::Missing, range),
             },
             ast::Pat::Literal(p) => match literal_of(p.syntax()) {
+                // The parser puts a negative integer's `-` in the pattern's
+                // node, beside the digits, and the sign belongs to the number:
+                // every reader of `Literal::Int` takes a leading `-`
+                // (`khora_syntax::number::int_literal_signed`).
+                Some(Literal::Int(digits)) if has_minus(p.syntax()) => {
+                    self.add_pat(Pat::Literal(Literal::Int(format!("-{digits}"))), range)
+                }
                 Some(lit) => self.add_pat(Pat::Literal(lit), range),
                 None => self.add_pat(Pat::Missing, range),
             },
@@ -254,4 +261,11 @@ impl<'a> Ctx<'a> {
         })
         .collect()
     }
+}
+
+/// Whether a literal pattern's node holds a `-` before its digits.
+fn has_minus(node: &khora_syntax::SyntaxNode) -> bool {
+    node.children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| t.kind() == khora_syntax::SyntaxKind::MINUS)
 }

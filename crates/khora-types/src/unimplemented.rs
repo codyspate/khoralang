@@ -25,10 +25,11 @@
 //! build, and an editor runs `check` on every keystroke. What this costs
 //! instead is a pass over the bodies reachable from concrete ones, once per
 //! source root, following path calls and the method calls the checker
-//! recorded. It does not resolve which impl a call through a trait bound
-//! selects, so a generic impl reached only that way is not followed; a call
-//! to a bodiless function inside one passes `check` and fails the build, as
-//! every such call did before.
+//! recorded. A call through a trait on a concrete type is read as the impl
+//! for that type's head (see `impl_method_key`). A call through a trait
+//! *bound* inside a generic is not resolved, so a generic impl reached only
+//! that way is not followed; a call to a bodiless function inside one passes
+//! `check` and fails the build, as every such call did before.
 //!
 //! Not `std`: its bodiless functions are the intrinsics, which code
 //! generation writes at each call site, and a program cannot add one. A
@@ -76,6 +77,9 @@ pub fn unimplemented_functions(db: &dyn Db, root: SourceRoot) -> HashSet<(Module
                     }
                     for f in imp.functions().filter(|f| f.body().is_none()) {
                         if let Some(name) = f.name().and_then(|n| n.ident()) {
+                            if is_named_intrinsic(head, &name) {
+                                continue;
+                            }
                             out.insert((module.clone(), format!("{key}::{name}")));
                         }
                     }
@@ -171,10 +175,9 @@ pub(crate) fn unimplemented_function_errors(db: &dyn Db, file: SourceFile) -> Ve
             }
         }
         let Some((_, types)) = checked.bodies.iter().find(|(n, _)| n == function) else { continue };
-        let methods: Vec<(ExprId, &String)> = types
+        let methods: Vec<(ExprId, String)> = types
             .instantiations()
-            .filter(|(_, (key, _))| key.contains('#'))
-            .map(|(site, (key, _))| (*site, key))
+            .filter_map(|(site, (key, args))| impl_method_key(key, args).map(|k| (*site, k)))
             .collect();
         for (id, expr) in body.exprs() {
             let name = match expr {
@@ -183,9 +186,10 @@ pub(crate) fn unimplemented_function_errors(db: &dyn Db, file: SourceFile) -> Ve
                 {
                     name.clone()
                 }
-                // `p.twice()`: the checker recorded the impl's key at the call.
+                // `p.twice()`: the checker recorded the impl's key at the call,
+                // or the trait's for a call through a trait.
                 _ => match methods.iter().find(|(site, _)| *site == id) {
-                    Some((_, key)) if unimplemented.iter().any(|(_, k)| k == *key) => {
+                    Some((_, key)) if unimplemented.iter().any(|(_, k)| k == key) => {
                         crate::traits::readable_key(key).to_string()
                     }
                     _ => continue,
@@ -206,13 +210,41 @@ pub(crate) fn unimplemented_function_errors(db: &dyn Db, file: SourceFile) -> Ve
     found
 }
 
-/// Whether code generation implements the methods of the type `head` by
+/// The impl method a call recorded as `(key, type arguments)` runs, keyed as
+/// [`unimplemented_functions`] keys it, when that can be read off the call.
+///
+/// An inherent or static call records the impl's key itself (`#P::twice`).
+///
+/// A call through a trait -- `"ab".size()`, `Size::size(x)` -- records the
+/// *trait's* (`Size::size`) with `Self` as its first argument, and the impl is
+/// `Size#<head of Self>::size`. Without this second form a bodiless method in
+/// `impl Size for String` checked clean and failed to build with
+/// "`Size#String::size` has no body", located at a doc comment in an unrelated
+/// std file.
+///
+/// What it does not read: a `Self` with no head yet (a call inside a generic,
+/// which the build resolves per instance), and a trait with arguments, whose
+/// impl key spells them (`Convert<String>#Int`) as the call does not. Both
+/// pass `check` and fail the build, as every such call did before.
+fn impl_method_key(key: &str, args: &[Type]) -> Option<String> {
+    if key.contains('#') {
+        return Some(key.to_string());
+    }
+    let (trait_name, method) = key.split_once("::")?;
+    let head = crate::traits::head_of(args.first()?)?;
+    Some(crate::traits::method_key(trait_name, &head, method))
+}
+
+/// Whether code generation implements every method of the type `head` by
 /// name, whatever module declares them: `lower/calls.rs`'s `intrinsic`
-/// dispatches `String::byte_length` or `Ptr::null` on the owner's name and
-/// not on where the `impl` is, so a program that declares its own
-/// `impl Ptr { fn null() -> Ptr; }` -- the codegen crate's tests do -- builds. A bodiless method on one of these types is therefore
-/// left to the build, which knows the exact operations; checking names here
-/// as well would be a second copy of that table to drift.
+/// hands any call on these owners to the owner's own lowering, which refuses
+/// a name it does not know in its own words. A bodiless method on one of
+/// these types is therefore left to the build.
+///
+/// `String`, `Ptr`, `Char` and `Float` are not here: code generation lowers
+/// only some of their names ([`NAMED_INTRINSICS`]), and any other bodiless
+/// method on them is a function with no body, refused here as it is by the
+/// build.
 fn lowered_by_owner(head: &str) -> bool {
     matches!(
         head,
@@ -225,13 +257,41 @@ fn lowered_by_owner(head: &str) -> bool {
             | "Handoff"
             | "Selection"
             | "Array"
-            | "Char"
-            | "String"
-            | "Float"
-            | "Ptr"
             | "Int"
             | "I64"
     ) || crate::IntKind::parse(head).is_some()
+}
+
+/// The methods code generation lowers itself on owners it dispatches by
+/// method name, as `(owner, name)`.
+///
+/// **One table for `khora check` and for the build.** `khora check` left
+/// every bodiless method on these owners to the build, so a program's own
+/// `impl String { fn data(self) -> Ptr; }` called as `String::data(s)`
+/// checked clean and failed to build with "`#String::data` has no body". The
+/// code generator reads this table before it dispatches on these owners, so
+/// a name added there and not here is refused by both, and cannot drift into
+/// a second disagreement.
+pub const NAMED_INTRINSICS: &[(&str, &str)] = &[
+    ("Char", "code"),
+    ("Char", "of"),
+    ("Char", "from_code"),
+    ("Float", "to_int"),
+    ("Ptr", "null"),
+    ("Ptr", "is_null"),
+    ("String", "with_data"),
+    ("String", "with_c_string"),
+    ("String", "from_bytes"),
+    ("String", "bytes"),
+    ("String", "byte"),
+    ("String", "byte_length"),
+    ("String", "slice"),
+    ("String", "find"),
+];
+
+/// Whether `owner::name` is one of [`NAMED_INTRINSICS`].
+pub fn is_named_intrinsic(owner: &str, name: &str) -> bool {
+    NAMED_INTRINSICS.iter().any(|(o, n)| *o == owner && *n == name)
 }
 
 /// Whether `id` is the callee of a call code generation lowers itself, by

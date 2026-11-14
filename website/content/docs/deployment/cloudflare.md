@@ -12,6 +12,9 @@ means important pieces work and production support is not promised yet, and
 here only the bottom piece works. Khora can build a WebAssembly library that
 runs its own code — arrays, strings, loops, error handling and regions, on one
 thread of control with nothing to cancel it — and imports nothing from its host.
+A release archive carries the runtime that library links
+(`khora build --lib --target wasm32-unknown-unknown`, as
+[Supported targets](/docs/deployment/supported-targets/#webassembly) describes).
 `std` has no Worker-shaped platform surface above that, and no host-provided
 networking or storage capability is modeled, so there is no request to handle
 and nothing to store into. `print` inside the module writes nowhere: it has no

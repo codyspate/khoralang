@@ -473,6 +473,20 @@ fn a_prefix_minus_hugs_its_operand() {
     assert!(!out.contains("- 1"), "no minus should be separated from its operand:\n{out}");
 }
 
+/// **A negative literal pattern keeps its `-` against its digits**, as a
+/// negated expression does: `-128 =>` printed as `- 128 =>` reads as an
+/// operator where the language has none.
+#[test]
+fn a_negative_literal_pattern_hugs_its_digits() {
+    let out = format(
+        "module m;\n\nfn f(n: Int) -> Int {\n  match n {\n    -128 => 1,\n    -0x80 => 2,\n    _ => 3,\n  }\n}\n",
+    );
+    let out = out.expect("should parse");
+    assert!(out.contains("-128 => 1"), "{out}");
+    assert!(out.contains("-0x80 => 2"), "{out}");
+    assert!(!out.contains("- 128"), "{out}");
+}
+
 /// And subtraction keeps its spaces, which is the same token doing the other
 /// job.
 #[test]

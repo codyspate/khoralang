@@ -134,6 +134,12 @@ const SYSTEM_LIBS: &[&str] = &[
     "-luserenv",
     "-lws2_32",
     "-ldbghelp",
+    // `WakeByAddressSingle`, which Rust 1.100's `std` needs on Windows and
+    // which this list lacked: CI on 1.100 failed to link a Khora program on
+    // it. Taken from that failure, not from the command above, which has not
+    // been run on 1.100. An import library the program does not call into
+    // adds nothing to it, so this is safe on the 1.99 the build is pinned to.
+    "-lsynchronization",
 ];
 #[cfg(target_os = "linux")]
 const SYSTEM_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
@@ -160,6 +166,32 @@ const SYSTEM_LIBS: &[&str] = &[
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 const SYSTEM_LIBS: &[&str] = &["-lSystem", "-lc", "-lm"];
 
+/// A cargo target directory a test harness has computed, searched for the
+/// runtime archive after the probes beside the running executable.
+static TEST_TARGET_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Tells [`runtime_archive`] which cargo target directory this test run built
+/// into. For the compiler's own tests; set once per process, later calls are
+/// ignored.
+///
+/// **What it prevents: every in-process compile in a test failing to find the
+/// runtime when cargo keeps a separate build directory.** The probes below
+/// look beside `current_exe()`, and a test binary is there only when build
+/// output and artifacts share one directory. With `build.build-dir` (and Rust
+/// 1.100's default layout) the test binary is in the build directory and
+/// `libkhora_rt.a` in the target directory, so four of six tests failed with
+/// "the Khora runtime archive was not found" wherever `CARGO_TARGET_DIR` also
+/// moved the target directory off the workspace's `target/`, as CI caches do.
+/// A test cannot set `KHORA_RT_LIB`
+/// instead: the environment is process-wide, and setting it while other test
+/// threads read it is a data race.
+///
+/// There is no environment variable for it, so no user can set it.
+#[doc(hidden)]
+pub fn set_test_target_dir(dir: PathBuf) {
+    let _ = TEST_TARGET_DIR.set(dir);
+}
+
 /// The runtime archive generated executables link against.
 ///
 /// Searched rather than configured, in this order:
@@ -168,6 +200,9 @@ const SYSTEM_LIBS: &[&str] = &["-lSystem", "-lc", "-lm"];
 /// 2. Beside the running executable, and one directory up — which covers both
 ///    an installed `khora` and a `cargo test` binary in `target/*/deps`.
 /// 3. This crate's source tree, for a workspace build driven from elsewhere.
+///
+/// A test run's target directory ([`set_test_target_dir`]) is searched with
+/// the probes in 2, for the host archive and for a cross one.
 ///
 /// Returns `None` if nothing plausible is on disk, so the caller can say which
 /// command produces it rather than failing inside the linker.
@@ -191,8 +226,14 @@ pub fn runtime_archive() -> Option<PathBuf> {
     // member. Worse, with `--allow-undefined` it had said nothing at all and
     // turned every runtime symbol into a host import.
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let test_target = TEST_TARGET_DIR.get();
     if let Some(triple) = &triple {
         candidates.extend(cross_archive_candidates(triple));
+        if let Some(target) = test_target {
+            for profile in ["debug", "release"] {
+                candidates.push(target.join(triple).join(profile).join(cross_archive()));
+            }
+        }
         if let Some(workspace) = manifest_dir.parent().and_then(|c| c.parent()) {
             for profile in ["debug", "release"] {
                 candidates.push(
@@ -227,6 +268,10 @@ pub fn runtime_archive() -> Option<PathBuf> {
                 candidates.push(parent.join(RUNTIME_ARCHIVE));
             }
         }
+    }
+    if let Some(target) = test_target {
+        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        candidates.push(target.join(profile).join(RUNTIME_ARCHIVE));
     }
 
     // `CARGO_MANIFEST_DIR` is baked in at build time, so this only helps a
@@ -708,6 +753,83 @@ fn drive_static_musl(
     Ok(())
 }
 
+/// Which `wasm-ld` links a WebAssembly module: the LLVM prefix's, else the
+/// first on `PATH`. Takes both lookups' answers, so a test can give it a
+/// prefix that lacks the tool without moving one on disk.
+///
+/// **What it prevents: a released toolchain that cannot build for wasm on a
+/// machine that has `wasm-ld`.** The prefix is the one `khora` was *built*
+/// against, recorded at build time; on any other machine it is a path that
+/// does not exist, so a lookup that stopped there refused every wasm build
+/// from a downloaded `khora`, whatever the user had installed. [`linker`]
+/// makes the same fallback for `clang`, for the same reason.
+///
+/// The refusal names both places, because "set LLVM_SYS_221_PREFIX" is
+/// advice only somebody building the compiler can take.
+///
+/// **A `wasm-ld` from `PATH` must be LLVM [`LLVM_MAJOR`]'s.** The prefix's is
+/// the one the compiler was built with; a `PATH` one is whatever the machine
+/// has, and nothing else checked it: a stand-in that said "LLVM 14" and wrote
+/// `NOTWASM` was taken, and the build reported a library. `version` reads its
+/// `--version` (`LLD 22.1.8 (...)`); a major that is not ours, or no answer,
+/// is refused naming both versions. Not applied to the prefix's own, which
+/// is the build's by construction.
+fn wasm_linker(
+    in_prefix: Option<PathBuf>,
+    on_path: Option<PathBuf>,
+    prefix: Option<&Path>,
+    version: impl Fn(&Path) -> Option<String>,
+) -> Result<PathBuf, String> {
+    if let Some(pinned) = in_prefix {
+        return Ok(pinned);
+    }
+    let Some(found) = on_path else {
+        let first = match prefix {
+            Some(prefix) => format!("in {}", prefix.join("bin").display()),
+            None => "in an LLVM prefix (this `khora` was built without one)".to_string(),
+        };
+        return Err(format!(
+            "wasm-ld not found {first} or on PATH; install LLVM's `lld`, which provides \
+             `wasm-ld`, and put it on PATH"
+        ));
+    };
+    let said = version(&found);
+    match said.as_deref().and_then(lld_major) {
+        Some(major) if major == LLVM_MAJOR => Ok(found),
+        Some(major) => Err(format!(
+            "{} is LLVM {major}'s wasm-ld, and this khora was built with LLVM {LLVM_MAJOR}; \
+             install LLVM {LLVM_MAJOR}'s `lld` and put its wasm-ld first on PATH",
+            found.display()
+        )),
+        None => Err(format!(
+            "{} did not say which LLVM it is (`--version` gave {}); this khora needs \
+             LLVM {LLVM_MAJOR}'s wasm-ld",
+            found.display(),
+            said.map_or_else(|| "nothing".to_string(), |s| format!("{:?}", s.trim())),
+        )),
+    }
+}
+
+/// The LLVM major version this compiler was built against: the `llvm22-1`
+/// feature of `inkwell`, and the `221` in `LLVM_SYS_221_PREFIX`.
+const LLVM_MAJOR: u32 = 22;
+
+/// The major version in `wasm-ld --version`'s first line, `LLD 22.1.8 (...)`.
+/// Some builds prefix a vendor (`Homebrew LLD 22.1.8`, `Ubuntu LLD 22.1.8`),
+/// so this takes the number after the word `LLD`.
+fn lld_major(said: &str) -> Option<u32> {
+    let line = said.lines().next()?;
+    let mut words = line.split_whitespace();
+    words.find(|word| *word == "LLD")?;
+    words.next()?.split('.').next()?.parse().ok()
+}
+
+/// What `wasm-ld --version` printed, or `None` if it would not run.
+fn tool_version(tool: &Path) -> Option<String> {
+    let out = std::process::Command::new(tool).arg("--version").output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Links a WebAssembly module with `wasm-ld`.
 ///
 /// **Not through `clang`**, which drives the *host* linker: `lld-link` reads a
@@ -729,11 +851,7 @@ fn drive_wasm_ld(
     out: &Path,
     exports: &[String],
 ) -> Result<(), String> {
-    let linker = tool("wasm-ld").ok_or_else(|| {
-        "wasm-ld not found in the LLVM toolchain; set LLVM_SYS_221_PREFIX \
-         (see docs/llvm-setup.md)"
-            .to_string()
-    })?;
+    let linker = wasm_linker(tool("wasm-ld"), which("wasm-ld"), prefix().as_deref(), tool_version)?;
 
     let mut cmd = std::process::Command::new(&linker);
     // No `_start`: a Khora library is called through its exports, and a wasm
@@ -1112,6 +1230,69 @@ fn static_musl_flags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LLD_22: &str = "LLD 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a)\n";
+
+    fn says(text: &'static str) -> impl Fn(&Path) -> Option<String> {
+        move |_| Some(text.to_string())
+    }
+
+    /// **A prefix without `wasm-ld` falls back to `PATH`**: the prefix is
+    /// where `khora` was built, and on a machine that downloaded it, a path
+    /// that does not exist.
+    #[test]
+    fn wasm_ld_is_found_on_path_when_the_prefix_lacks_it() {
+        let on_path = PathBuf::from("/usr/bin/wasm-ld");
+        let found = wasm_linker(None, Some(on_path.clone()), Some(Path::new("/opt/llvm")), says(LLD_22));
+        assert_eq!(found, Ok(on_path));
+    }
+
+    /// The prefix's own wins when it has one, so a build from the tree links
+    /// with the LLVM it was built against; its version is not asked.
+    #[test]
+    fn wasm_ld_in_the_prefix_wins_over_path() {
+        let pinned = PathBuf::from("/opt/llvm/bin/wasm-ld");
+        let found =
+            wasm_linker(Some(pinned.clone()), Some(PathBuf::from("/usr/bin/wasm-ld")), None, |_| None);
+        assert_eq!(found, Ok(pinned));
+    }
+
+    /// The refusal names both places it looked, and says what to install.
+    #[test]
+    fn a_missing_wasm_ld_names_both_places_it_looked() {
+        let refused =
+            wasm_linker(None, None, Some(Path::new("/opt/llvm")), says(LLD_22)).expect_err("nowhere to find it");
+        assert!(refused.contains(&format!("{}", Path::new("/opt/llvm").join("bin").display())), "{refused}");
+        assert!(refused.contains("PATH"), "{refused}");
+        assert!(refused.contains("lld"), "{refused}");
+        let unprefixed = wasm_linker(None, None, None, says(LLD_22)).expect_err("nowhere to find it");
+        assert!(unprefixed.contains("built without one") && unprefixed.contains("PATH"), "{unprefixed}");
+    }
+
+    /// **A `wasm-ld` on `PATH` from another LLVM is refused, naming both
+    /// versions**, and so is one that does not say which it is. What it
+    /// prevents: a stand-in reporting "LLVM 14" that wrote `NOTWASM` was
+    /// taken, and the build reported a library.
+    #[test]
+    fn a_wasm_ld_on_path_from_another_llvm_is_refused() {
+        let on_path = Some(PathBuf::from("/usr/bin/wasm-ld"));
+        let old = wasm_linker(None, on_path.clone(), None, says("LLD 14.0.6\n")).expect_err("LLVM 14");
+        assert!(old.contains("LLVM 14") && old.contains("LLVM 22"), "{old}");
+        let silent = wasm_linker(None, on_path.clone(), None, |_| None).expect_err("no answer");
+        assert!(silent.contains("did not say") && silent.contains("LLVM 22"), "{silent}");
+        let other = wasm_linker(None, on_path, None, says("GNU ld 2.42\n")).expect_err("not LLD");
+        assert!(other.contains("did not say"), "{other}");
+    }
+
+    /// A vendor in front of `LLD` is read past, and only the major counts.
+    #[test]
+    fn the_lld_major_is_read_past_a_vendor_name() {
+        assert_eq!(lld_major(LLD_22), Some(22));
+        assert_eq!(lld_major("Homebrew LLD 22.1.0\n"), Some(22));
+        assert_eq!(lld_major("Ubuntu LLD 18.1.3 (compatible with GNU linkers)"), Some(18));
+        assert_eq!(lld_major("LLD"), None);
+        assert_eq!(lld_major(""), None);
+    }
 
     /// gcc is a driver [`linker`] accepts on Linux, and it refuses `--target=`
     /// outright: `unrecognized command-line option`. A machine with gcc and no

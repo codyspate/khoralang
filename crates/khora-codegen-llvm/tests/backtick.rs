@@ -153,6 +153,24 @@ fn a_literal_that_starts_on_the_same_line_keeps_its_shape() {
     assert_eq!(out, "one\ntwo\n");
 }
 
+/// **A literal that opens on its content still loses the line break before
+/// a closing backtick on its own line**, and the indentation of that last
+/// line with it. The two trims are independent: the opening one finds no
+/// blank first line and takes nothing, and the closing one finds a blank
+/// last line and takes it. `` `a⏎b⏎` `` is `a⏎b`, three bytes, and
+/// `` `x⏎  y⏎  ` `` keeps `y`'s indentation -- the first line, at column
+/// zero, is the minimum -- and loses the trailing `⏎  `. Pinned because the
+/// reference page once said nothing at all is removed in this form, and a
+/// reader who believed it lost a final line feed.
+#[test]
+fn a_literal_that_starts_on_the_same_line_still_drops_a_closing_blank_line() {
+    let out = run(
+        "backtick_inline_close",
+        &format!("{PRELUDE}\nfn main() -> Int {{ print(`a\nb\n`); print(`x\n  y\n  `); 0 }}\n"),
+    );
+    assert_eq!(out, "a\nb\nx\n  y\n", "print adds one line feed; a kept closing line would add a second");
+}
+
 /// The ordinary quoted literal is untouched.
 #[test]
 fn a_quoted_literal_still_means_what_it_did() {

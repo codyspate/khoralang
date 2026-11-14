@@ -985,6 +985,7 @@ mod unresolved;
 pub use foreign::{can_raise, foreign_obstacle, foreign_signature_obstacle};
 pub use forging::{constructor, may_construct_capabilities, Constructor, Internal, CONSTRUCTORS, STD_INTERNAL};
 pub use imports::{foreign_symbols, ForeignDecl};
+pub use unimplemented::{is_named_intrinsic, NAMED_INTRINSICS};
 
 pub use reporting::*;
 pub use map::*;

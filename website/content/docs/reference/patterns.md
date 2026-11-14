@@ -51,26 +51,39 @@ Bind with a lower-case name.
 
 ```khora
 0
+-128
 3.14
 "ready"
+'a'
 true
 false
 ```
 
-Integer, floating-point, string, and boolean literals can be used as literal patterns.
+Integer, floating-point, string, character, and boolean literals can be used as literal patterns. An integer may be negative: `-128` is a pattern, in any base (`-0x80`). No other literal takes a sign in a pattern, and `-x` is not a pattern.
 
 An integer literal pattern has to fit the type of the value it is matched
 against, as it would in `let b: U8 = 256;`. In any base, at the top of a
 pattern or inside a tuple, a case's payload or a record, a literal the
 type cannot hold is a compile error: `0x100 =>` against a `U8` is refused
 with "`0x100` does not fit in `U8`, which holds 0 to 255" rather than
-read as its low byte.
+read as its low byte. A negative pattern against an unsigned type, or
+`-129` against an `I8`, is refused the same way.
+
+Two arms with the same value are one arm written twice, whatever the spelling: in `match b { 255 => .., 0xFF => .., _ => .. }` the second arm is reported as unreachable, on every integer type. Literal arms never cover every value of an integer, character, floating-point or string type, so a `match` over one of them needs a final `_` or binding arm; one without is a compile error rather than a program that stops when no arm matches.
 
 ```khora
 fn kind(b: U8) -> String {
   match b {
     0xFF => "all ones",
     0x7F => "the top bit clear",
+    _ => "other",
+  }
+}
+
+fn sign(n: I8) -> String {
+  match n {
+    -128 => "the minimum",
+    0 => "zero",
     _ => "other",
   }
 }
@@ -122,7 +135,7 @@ Path {
 }
 ```
 
-A record pattern begins with a path and may bind fields by shorthand or supply another pattern after `:`.
+A record pattern begins with a path and may bind fields by shorthand or supply another pattern after `:`. A record type is matched by its own name, `User { id }` for `type User = { id: Int, name: String }`, and a case by its qualified name with its payload's field names, `Shape::Circle { radius }` for `| Circle(radius: Int)`. A field left out of the pattern matches anything.
 
 ## Tuple pattern
 

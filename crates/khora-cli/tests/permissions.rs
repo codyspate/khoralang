@@ -792,6 +792,127 @@ fn pinned(manifest: &str) -> String {
     format!("{manifest}\n[toolchain]\nversion = \"{}\"\n", khora_toolchain::RUNNING)
 }
 
+/// Builds and runs `source` in a project whose manifest ends with `table`,
+/// answering whether it ran and what it printed.
+#[cfg(feature = "llvm")]
+fn run_with_table(name: &str, table: &str, source: &str) -> (bool, String) {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    write(&root.join("khora.toml"), &pinned(&format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n{table}")));
+    write(&root.join("src").join("main.kh"), source);
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(["run", "."])
+        .current_dir(&root)
+        .env("KHORA_HOME", root.join("home"))
+        .output()
+        .expect("running khora");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// **A thousand entries in every list key build, and the last one is
+/// granted.** Each list was written into std's grants module as one nested
+/// expression, one level per entry, and the parser refuses anything nested
+/// past 256: a `network` list of 260 hosts made std's own file fail to parse.
+/// The entry one past each list is asked too, so a list that is cut short or
+/// that grants everything fails here.
+#[cfg(feature = "llvm")]
+#[test]
+fn a_thousand_grants_in_every_list_build_and_the_last_one_holds() {
+    let list = |shape: &dyn Fn(usize) -> String| -> String {
+        (0..1000).map(|i| format!("\"{}\"", shape(i))).collect::<Vec<_>>().join(", ")
+    };
+    let mut externs: Vec<String> = (0..999).map(|i| format!("\"pkg{i}\"")).collect();
+    externs.push("\"app\"".to_string());
+    let table = format!(
+        "[permissions]\ndefault = \"deny\"\n\
+         network = [{}]\nlisten = [{}]\nenv = [{}]\nprocess = [{}]\nextern = [{}]\n\n\
+         [permissions.fs]\nread = [{}]\nwrite = [{}]\n",
+        list(&|i| format!("h{i}.example.com")),
+        list(&|i| format!("{}", 20000 + i)),
+        list(&|i| format!("VAR_{i}")),
+        list(&|i| format!("tool{i}")),
+        externs.join(", "),
+        list(&|i| format!("data{i}/**")),
+        list(&|i| format!("out{i}/**")),
+    );
+    let source = "module main;\n\n\
+        import std::core::{List, print};\n\
+        import std::permissions::{granted, granted_host, granted_listen, granted_name};\n\
+        import std::permissions::grants::{env, fs_read, fs_write, listen, network, process};\n\n\
+        extern fn khora_live_count() -> Int;\n\n\
+        fn line(key: String, all: List<String>, last: Bool, past: Bool) -> () {\n  \
+          print(\"${key} ${List::length(all)} ${last} ${past}\");\n\
+        }\n\n\
+        pub fn main() -> Int {\n  \
+          let last_host = \"h999.example.com:443\";\n  \
+          let past_host = \"h1000.example.com:443\";\n  \
+          line(\"network\", network(), granted_host(network(), last_host), granted_host(network(), past_host));\n  \
+          let last_port = \"0.0.0.0:20999\";\n  \
+          let past_port = \"0.0.0.0:21000\";\n  \
+          line(\"listen\", listen(), granted_listen(listen(), last_port), granted_listen(listen(), past_port));\n  \
+          line(\"env\", env(), granted_name(env(), \"VAR_999\"), granted_name(env(), \"VAR_1000\"));\n  \
+          line(\"process\", process(), granted_name(process(), \"tool999\"), granted_name(process(), \"tool1000\"));\n  \
+          line(\"read\", fs_read(), granted(fs_read(), \"data999/x\"), granted(fs_read(), \"data1000/x\"));\n  \
+          line(\"write\", fs_write(), granted(fs_write(), \"out999/x\"), granted(fs_write(), \"out1000/x\"));\n  \
+          let live = khora_live_count();\n  \
+          print(\"extern ${live >= 0}\");\n  \
+          0\n\
+        }\n";
+    let (ok, text) = run_with_table("perm_thousand", &table, source);
+    assert!(ok, "a thousand grants per key should build and run:\n{text}");
+    for line in [
+        "network 1000 true false",
+        "listen 1000 true false",
+        "env 1000 true false",
+        "process 1000 true false",
+        "read 1000 true false",
+        "write 1000 true false",
+        "extern true",
+    ] {
+        assert!(text.contains(line), "expected {line:?}:\n{text}");
+    }
+}
+
+/// **A grant pattern is text, whatever characters it holds.** The patterns
+/// were pasted into std's grants module with only `"` and `\` escaped, so a
+/// `${x}` in one was an interpolation in a file std's gate counts as std's
+/// own. Each of `${..}`, `"` and `\` is matched as written, and only as
+/// written: the pattern `A${x}"\B` grants a variable named exactly that and
+/// not one named after what `${x}` would have printed.
+#[cfg(feature = "llvm")]
+#[test]
+fn a_grant_pattern_is_matched_as_the_text_it_is() {
+    let table = "[permissions]\ndefault = \"deny\"\nenv = ['A${x}\"\\B']\n";
+    let source = "module main;\n\n\
+        import std::core::{List, Option, print};\n\
+        import std::permissions::{granted_name};\n\
+        import std::permissions::grants::{env};\n\n\
+        pub fn main() -> Int {\n  \
+          let x = \"x\";\n  \
+          let written = \"A\\${x}\\\"\\\\B\";\n  \
+          let interpolated = \"A${x}\\\"\\\\B\";\n  \
+          let unquoted = \"A\\${x}B\";\n  \
+          let shown = match List::head(env()) {\n    \
+            Option::Some(only) => only,\n    \
+            Option::None => \"none\",\n  \
+          };\n  \
+          print(\"pattern ${shown}\");\n  \
+          print(\"length ${List::length(env())}\");\n  \
+          print(\"exact ${granted_name(env(), written)}\");\n  \
+          print(\"interpolated ${granted_name(env(), interpolated)}\");\n  \
+          print(\"unquoted ${granted_name(env(), unquoted)}\");\n  \
+          0\n\
+        }\n";
+    let (ok, text) = run_with_table("perm_escaped", table, source);
+    assert!(ok, "a pattern with `${{..}}`, `\"` and `\\` should build:\n{text}");
+    assert!(text.contains("pattern A${x}\"\\B"), "{text}");
+    assert!(text.contains("length 1"), "{text}");
+    assert!(text.contains("exact true"), "{text}");
+    assert!(text.contains("interpolated false"), "{text}");
+    assert!(text.contains("unquoted false"), "{text}");
+}
+
 // ---------------------------------------------------------------------------
 // `default`, which is the key that decides every category nobody wrote down.
 //

@@ -1385,16 +1385,26 @@ mod tests {
         let (_, h) = holder(&pool, c, |n| Ok(n + 1), move || {
             update(c, again).expect("H's second update");
         });
+        // SAFETY: the cell stays live until the test ends; only its line is read.
+        let held = unsafe { held_of(c as *mut u8).expect("the cell") };
+        // The thread at `at` in the line, if there is one. **Read, not slept
+        // for:** a 20 ms sleep let a thread scheduled late line up behind A,
+        // and the test then failed on the order it exists to check.
+        let thread_at = |at: usize| {
+            let line = held.lock.line.lock().unwrap();
+            matches!(line.waiting.get(at), Some(Waiting { how: Wakes::Thread(_), .. }))
+        };
         let reader = std::thread::spawn(move || get(c));
-        // Long enough for the thread to have spun and lined up.
-        std::thread::sleep(Duration::from_millis(20));
+        pool.until("the thread never lined up", || thread_at(0));
         let (_, a_got) = pool.waiter(c, |n| Ok(n + 100));
 
         h.wake();
         pool.until("H never took the cell again", || second.lock().unwrap().is_some());
-        // Long enough for the thread to have woken, found it taken, and
-        // lined up again.
-        std::thread::sleep(Duration::from_millis(20));
+        // Woken, found H back in the cell, and lined up again: ahead of A. Or
+        // it beat H to the free cell and has read, which is no wrong order.
+        pool.until("the thread never lined up again", || {
+            reader.is_finished() || (held.lock.line.lock().unwrap().waiting.len() == 2 && thread_at(0))
+        });
         second.lock().unwrap().take().expect("H's second waker").wake();
 
         pool.until("A never got the cell", || result(&a_got).is_some());

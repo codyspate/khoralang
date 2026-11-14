@@ -405,9 +405,29 @@ it will behave differently now.
   waits on a failed worker with a bare `!` while it holds a listener it
   meant to detach afterwards waits for that listener for ever. Catch the
   error at the wait, or detach the listener first.
+- A `match` on a `U8`, `U16`, `U32`, `U64`, `I8`, `I16`, `I32`, `Char` or
+  `Float` whose arms are literals and no `_` or binding is refused as not
+  exhaustive, as one on an `Int` or a `String` is. On a `Char` or a `Float`
+  it built, and a value no arm named stopped the program with an illegal
+  instruction; on the integer types it failed to build with "not valid LLVM
+  IR". A second arm with the same value as an earlier one, in any spelling
+  (`255` and `0xFF`, `1.5` and `1.50`), is refused as unreachable on these
+  types too.
+- `[workspace.policy] process` caps which members may grant `process`, as
+  the policy's other keys cap theirs. A member that grants
+  `[permissions] process` without being named there is refused when its
+  manifest loads.
 
 ### Security
 
+- `[workspace.policy] process = [..]` capped nobody: any member could grant
+  itself any program to run while the workspace root said only the listed
+  members may. It is enforced (see Breaking).
+- A `[permissions]` pattern was written into the program's generated grants
+  module with only `"` and `\` escaped, so `${..}` in a pattern was
+  interpolated as code inside a `std` module. Every character a string
+  literal treats specially is escaped, and a pattern matches only its own
+  text.
 - A function in a dependency could call `FsRead::real()`, or any other
   capability's constructor, with no `with` row, and read files, take the time
   or draw randomness while its signature said it did nothing; under
@@ -430,6 +450,49 @@ it will behave differently now.
 
 ### Fixed
 
+- `Float::to_string` writes a double outside `0.000001` up to below `1e21`
+  with an exponent -- `1e300`, `1e-7`, `5e-324` -- the shortest digits that
+  read back, as JavaScript writes them. It answered `"?"` for a double whose
+  plain digits passed 32 bytes, such as `1e300` and `5e-324`, so
+  `Json::of_float` answered `None` for those finite numbers and a derived
+  `Encode` wrote them as `null`. **Observable:** `1e-7` is `1e-7`, not
+  `0.0000001`, and `1e21` is `1e21`.
+- `Float::of_string` reads a number as the double nearest it, as Go, Rust,
+  JavaScript and Python do. It built the value digit by digit in doubles,
+  rounding at each step, and was one unit in the last place off for about
+  four numbers in five: `1.118` read as `1.1179999999999999`, and `5e-324`
+  as `0`. `std::json`'s `Json::number` and `std::schema`'s `float()` read
+  through it, so a document decoded and encoded again changed its numbers.
+  **Observable:** results are correctly rounded, so some differ from before
+  in the last place; `-0` reads as `-0`, where it read as `0`; a number past
+  the largest double reads as infinity (`1.7976931348623159e308`), where it
+  read as a finite one; and a number such as `0e400`, or `1` followed by 400
+  zeros and `e-400`, reads as the number it spells, where `of_string`
+  answered `Some(NaN)` and `Json::number` passed that on. What it accepts
+  and refuses is unchanged: `inf`, `nan`, `+1`, `.5` and `1.` are still
+  refused.
+- The lexical-structure reference says what a backtick literal that starts
+  on its opening line keeps: its indentation, but not a closing line of its
+  own. It said nothing was removed in that form.
+- A Khora program built on Windows links `synchronization.lib`, which the
+  Rust 1.100 runtime needs for `WakeByAddressSingle`. The compiler's own
+  tests find `khora` and the runtime archives with cargo's separate build
+  directory, which Rust 1.100 uses by default.
+- A `[permissions]` list of more than about 250 entries in any key
+  (`network`, `listen`, `env`, `process`, `extern`, `fs.read`, `fs.write`)
+  made the build fail with "nested more than 256 deep" in `std`'s grants
+  module. A thousand entries per key build, and the last entry is granted.
+- `khora check` refuses a call to a bodiless method declared on `String`,
+  `Ptr`, `Char` or `Float` that code generation does not provide
+  ("`String::data` has no body, so there is nothing to call", at the call),
+  and `khora build` refuses it the same way. `khora check` passed it, and
+  the build refused it only in code generation, by its internal name
+  (`#String::data`) and with no line. The same holds for a bodiless method
+  in a trait impl, `impl Size for String { fn size(self) -> Int; }`, called
+  as `"ab".size()` or `Size::size("ab")`, on any type: the build named it
+  `Size#String::size` at a line in an unrelated `std` file. A call through a
+  trait bound inside a generic function is still refused only by the
+  build.
 - `Entry::show(e)` -- a call that names a type and a trait method of it --
   calls the impl for the `Entry` the file means. With two modules that each
   declare an `Entry` and `impl Show for Entry`, it called whichever module
@@ -701,6 +764,22 @@ it will behave differently now.
   holding the build.
 
 ### Added
+
+- Every release archive carries the WebAssembly runtime, in
+  `targets/wasm32-unknown-unknown/`, so a released toolchain links
+  `khora build --lib --target wasm32-unknown-unknown` with nothing set. It
+  needed a source checkout and `KHORA_RT_LIB`. `wasm-ld` is looked for in
+  the LLVM installation the compiler was built against and then on `PATH`,
+  as `clang` is; it was looked for only in the first, which a downloaded
+  `khora` does not have. One from `PATH` must be LLVM 22's, as the
+  compiler is, and another is refused naming both versions (on macOS,
+  Homebrew's `lld@22` provides it). The release workflow builds a wasm module with each
+  `.tar.gz` before publishing it.
+
+- A negative integer is a pattern: `-128 => ..` matches an `I8`'s minimum,
+  in any base (`-0x80`). It has to fit the value's type, as a negative
+  literal in a `let` does: `-129` against an `I8`, or any negative number
+  against an unsigned type, is refused.
 
 - `Router::uncontained`: a router on which a trap in a handler ends the
   process with 134 instead of answering 500. See Breaking.

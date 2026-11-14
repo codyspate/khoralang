@@ -233,13 +233,19 @@ fn block() -> String {
 
 It is `"line one\n  indented\nline three"`. `indented` keeps two spaces because the common prefix was two, not four. A literal that should *end* with a newline needs a blank line before the closing backtick, and one that should start with a newline needs a blank line after the opening one.
 
-None of it applies when the content starts on the opening line, which is the
-form to reach for when the text must be taken exactly as written:
+When the content starts on the opening line, the opening line has nothing to
+remove and, being at column zero, leaves no indentation common to every line,
+so the text is taken as written. Only a closing backtick on a line of its own
+still takes the line break and indentation before it:
 
 ```khora
 let raw = `first
   second`;
 ```
+
+is `"first\n  second"`, and so is the same text with the closing backtick
+moved to the next line. To end such a literal with a line break, write `\n`
+before the closing backtick.
 
 ## Line comments
 

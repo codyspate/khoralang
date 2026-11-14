@@ -580,6 +580,63 @@ fn decimal_operators_stop_where_the_methods_do() {
     }
 }
 
+/// **A negative literal pattern matches the number it names**, at the
+/// scrutinee's width: `-128` and `-0x80` on an `I8` are its minimum, `-1` on
+/// an `I16` is all ones, and `Int`'s minimum is a pattern too. Without the
+/// grammar for it the smallest value of a signed type could be matched only
+/// by a guard.
+#[test]
+fn a_negative_literal_pattern_matches_its_number() {
+    prints(
+        "negative_patterns",
+        r#"  let lo: I8 = -128;
+  let hi: I8 = 127;
+  let m1: I8 = -1;
+  let w: I16 = -1;
+  let w2: I16 = 1;
+  let small = fn (x: I8) => match x { -128 => "min", -1 => "minus one", 127 => "max", _ => "other" };
+  let based = fn (x: I8) => match x { -0x80 => "min", _ => "other" };
+  let word = fn (x: I16) => match x { -1 => "all ones", _ => "other" };
+  let int = fn (x: Int) => match x { -9223372036854775808 => "min", -1 => "minus one", 0 => "zero", _ => "other" };
+  let pair = fn (p: (I8, Int)) => match p { (-128, -2) => "both", (_, -2) => "right", _ => "other" };
+  let floor = -9223372036854775807 - 1;
+  print("${small(lo)} ${small(m1)} ${small(hi)} ${based(lo)} ${based(m1)}");
+  print("${word(w)} ${word(w2)}");
+  print("${int(floor)} ${int(-1)} ${int(0)} ${int(1)}");
+  print("${pair((lo, -2))} ${pair((hi, -2))} ${pair((lo, 2))}");"#,
+        &[
+            "min minus one max min other",
+            "all ones other",
+            "min minus one zero other",
+            "both right other",
+        ],
+    );
+}
+
+/// **A `match` on a fixed-width integer with no catch-all is refused**, not
+/// built: with literal arms alone a value none of them names reached the end
+/// of the arms and stopped the program with an illegal instruction.
+#[test]
+fn a_byte_match_without_a_catch_all_is_refused() {
+    let db = KhoraDatabase::new();
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("numerics_byte_no_catch_all");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let source = format!(
+        "{HEAD}\nfn name(b: U8) -> String {{ match b {{ 0 => \"zero\", 1 => \"one\" }} }}\n\
+         pub fn main() -> () {{\n  let b: U8 = 2;\n  print(name(b));\n}}\n"
+    );
+    let root = SourceRoot::new(&db, sources(&db, &dir, &source));
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let errors = match khora_codegen_llvm::compile(&db, root, &exe) {
+        Ok(()) => panic!("a byte match with no catch-all should be refused"),
+        Err(errors) => errors.into_iter().map(|e| e.message).collect::<Vec<_>>(),
+    };
+    assert!(
+        errors.iter().any(|e| e.contains("this `match` is not exhaustive: pattern `_` not covered")),
+        "{errors:?}"
+    );
+}
+
 /// `Array::to_list` is the elements first to last, and an empty array is an
 /// empty list.
 #[test]

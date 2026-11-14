@@ -55,7 +55,8 @@ pub(crate) fn enforce(
     let Some(package) = manifest.package() else { return Ok(()) };
     let name = &package.name;
 
-    for category in [Category::Network, Category::Listen, Category::Fs, Category::Env] {
+    // Every category, `process` included: see `Category::ALL`.
+    for category in Category::ALL {
         let Some(allowed) = policy.allowed(category) else { continue };
         if !asks_for(manifest, category) {
             continue;

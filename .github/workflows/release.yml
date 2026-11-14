@@ -136,6 +136,19 @@ jobs:
           if [ -z "$prefix" ]; then echo "setup-llvm printed nothing"; exit 1; fi
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
 
+      # **macOS: `wasm-ld` is in Homebrew's `lld@22`, not `llvm@22`**, whose
+      # formula builds without `lld`. The wasm check below links a module with
+      # the packaged `khora`, which looks in the LLVM prefix and then on PATH,
+      # so the leg needs LLVM 22's `wasm-ld` on PATH. The compiler refuses a
+      # `wasm-ld` from another LLVM, so whatever the image already has cannot
+      # stand in for it.
+      - name: Put LLVM 22's wasm-ld on PATH (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew list --formula lld@22 >/dev/null 2>&1 || brew install lld@22
+          echo "$(brew --prefix lld@22)/bin" >> "$GITHUB_PATH"
+
       # **Named for the tag, not the manifest.** A candidate is tagged
       # `v0.2.0-rc.1` while `Cargo.toml` still says `0.2.0`; the artifact has
       # to carry the tag's version or `install.sh`, which builds the filename
@@ -144,6 +157,36 @@ jobs:
       - name: Package
         shell: bash
         run: sh scripts/package.sh --version "${TAG#v}"
+
+      # **The WebAssembly runtime is in the archive, and found there.** Read
+      # from the published file itself, then used: the packaged `khora` builds
+      # a `--lib` for `wasm32-unknown-unknown` with nothing set. Every test in
+      # the repository finds that runtime in the cargo target directory, so
+      # only this can tell whether the archive carries it. A `.zip` is checked
+      # by its listing; the build half runs on the three `.tar.gz` runners.
+      # **What it does not prove is a user's `wasm-ld`**: the compiler looks
+      # in the LLVM prefix baked in at build time, then on PATH, and requires
+      # LLVM 22's. The Linux runners have it in the prefix (apt.llvm.org's
+      # `lld`); macOS gets it on PATH from `lld@22` (above); the Windows
+      # `.zip` is checked by listing only and links nothing.
+      #
+      # **The bundle is found by a loop, not `ls | head`.** Each runner makes
+      # one bundle, so one of the two globs never matches, and under this
+      # shell's `-o pipefail` the failing `ls` ended the step before anything
+      # was checked -- on every runner, so `attach` published nothing.
+      - name: The archive builds for wasm32-unknown-unknown
+        shell: bash
+        run: |
+          set -eu
+          bundle=
+          for candidate in dist/khora-*.tar.gz dist/khora-*.zip; do
+            if [ -e "$candidate" ]; then bundle=$candidate; break; fi
+          done
+          if [ -z "$bundle" ]; then
+            echo "no dist/khora-*.tar.gz or dist/khora-*.zip to check; did Package run?" >&2
+            exit 1
+          fi
+          sh scripts/check-package-layout.sh "$bundle"
 
       # **The artifact is used before it is published**, and this is the only
       # place that can happen. Every test inside the repository finds `std/`

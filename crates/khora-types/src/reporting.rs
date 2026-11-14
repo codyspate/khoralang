@@ -51,7 +51,17 @@ pub(crate) fn field_type(ty: &Type) -> FieldType {
 pub(crate) fn column_type(types: &TypeMap, ty: &Type) -> ColumnType {
     match ty {
         Type::Bool => ColumnType::Finite(vec![Ctor::Bool(true), Ctor::Bool(false)]),
-        Type::Int | Type::Str => ColumnType::Unbounded,
+        // **Every type a literal pattern can be written for.** A `U8`, a
+        // `Char` or a `Float` fell to `Unknown`, which means "never report",
+        // so `255 => .., 0xFF => ..` on a byte was accepted in silence and a
+        // `match` on a byte with no `_` built and stopped the program with an
+        // illegal instruction when no arm matched.
+        //
+        // What it costs: a `U8` is finite, and a `match` that writes all 256
+        // values is still told it needs a `_`. Listing them is not a program
+        // anyone writes, and enumerating them would name 255 missing
+        // patterns in the message for the one that is.
+        Type::Int | Type::Str | Type::Fixed(_) | Type::Char | Type::Float => ColumnType::Unbounded,
         Type::Adt { name, home, args } => {
             let variants = types.variants_of(home.as_ref(), name);
             if variants.is_empty() {
@@ -68,7 +78,21 @@ pub(crate) fn column_type(types: &TypeMap, ty: &Type) -> ColumnType {
                 )
             }
         }
-        _ => ColumnType::Unknown,
+        // **Listed rather than caught by `_`**, because a `_` here is how the
+        // fixed-width integers were left out: a new scalar type has to be
+        // placed in one group or the other on purpose.
+        Type::Unit
+        | Type::Ptr
+        | Type::Fn { .. }
+        | Type::Var(_)
+        | Type::Param(_)
+        | Type::Applied { .. }
+        | Type::Row { .. }
+        | Type::Tuple(_)
+        | Type::Assoc { .. }
+        | Type::Const(_)
+        | Type::Never
+        | Type::Unknown => ColumnType::Unknown,
     }
 }
 

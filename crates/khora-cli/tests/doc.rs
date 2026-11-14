@@ -8,13 +8,15 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// The `khora` cargo built for this test, by the path cargo gives it.
+///
+/// **Not by walking up from this test binary**, which assumed the binary
+/// sat in `target/<profile>/deps/` beside a `target/<profile>/khora`. With a
+/// separate build directory -- `build.build-dir`, and Rust 1.100's default
+/// layout -- test binaries move and the walk found no `khora`, so every
+/// test here failed on a missing file.
 fn khora() -> PathBuf {
-    let mut path = std::env::current_exe().expect("the test binary");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.join(format!("khora{}", std::env::consts::EXE_SUFFIX))
+    PathBuf::from(env!("CARGO_BIN_EXE_khora"))
 }
 
 fn write(path: &Path, text: &str) {

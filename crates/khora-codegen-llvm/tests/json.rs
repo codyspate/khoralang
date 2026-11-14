@@ -121,6 +121,86 @@ fn main() -> Int {{
     assert_eq!(out, "\"a\\u0001b\"\n\"\\u001f\"\n0\n");
 }
 
+/// **A finite double far from one is a JSON number, never `?` and never
+/// dropped.** `Float::to_string` answered `"?"` for `1e300` and `5e-324`,
+/// so `Json::of_float` -- which reads its own text back before it trusts it
+/// -- answered `None` for two ordinary finite numbers, and a derived
+/// `Encode` wrote them as `null`. Infinity is still `None`: JSON has no word
+/// for it. Made by arithmetic, as Khora has no exponent in its literals.
+#[test]
+fn a_very_large_or_small_float_is_a_json_number() {
+    let out = run(
+        "json_float_exponent",
+        &format!(
+            "{HEAD}
+fn power(n: Int) -> Float {{
+  let mut out = 1.0;
+  let mut left = n;
+  while left > 0 {{ out = out * 10.0; left = left - 1 }};
+  out
+}}
+
+fn written(value: Float) -> String {{
+  match Json::of_float(value) {{ Option::Some(j) => encode(j), Option::None => \"none\" }}
+}}
+
+fn main() -> Int {{
+  let mut tiny = 1.0;
+  let mut halvings = 0;
+  while halvings < 1074 {{ tiny = tiny / 2.0; halvings = halvings + 1 }};
+  print(written(power(300)));
+  print(written(tiny));
+  print(written(1.0 / power(7)));
+  print(written(1.0 / 0.0));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(out, "1.0000000000000002e300\n5e-324\n1e-7\nnone\n");
+}
+
+/// **A number in a document decodes to the double nearest it.** The reader
+/// built the value digit by digit in doubles, rounding at every step, so
+/// `1.118` came back as `1.1179999999999999` -- one unit in the last place
+/// off, for about four numbers in five. Printed through `Float::to_string`,
+/// which writes the shortest text that reads back as the same double, so a
+/// number that decoded exactly prints as it was written and one that did not
+/// shows the difference.
+#[test]
+fn a_json_number_decodes_to_the_nearest_double() {
+    let out = run(
+        "json_float_exact",
+        &format!(
+            "{HEAD}
+fn decoded(text: String) -> String {{
+  match parse(text) {{
+    Result::Err(_) => \"unparsed\",
+    Result::Ok(doc) => match Json::number(doc) {{
+      Option::None => \"not a number\",
+      Option::Some(value) => Float::to_string(value),
+    }},
+  }}
+}}
+
+fn main() -> Int {{
+  print(decoded(\"1.118\"));
+  print(decoded(\"0.1\"));
+  print(decoded(\"5e-324\"));
+  print(decoded(\"1.122\"));
+  print(decoded(\"-2.2250738585072014e-308\"));
+  print(decoded(\"123456789012345678901234567890\"));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        "1.118\n0.1\n5e-324\n1.122\n-2.2250738585072014e-308\n1.2345678901234568e29\n"
+    );
+}
+
 /// Text outside the basic plane arrives as a surrogate pair and has to be
 /// joined; a parser that stops at the first half cannot read an emoji.
 #[test]

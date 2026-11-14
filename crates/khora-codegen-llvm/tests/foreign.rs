@@ -339,8 +339,9 @@ impl Ptr {
     // The refusal by name, not merely a mention of it: with no map keyed by
     // bare name, the declaration has no signature at all, and the generic
     // "has no signature to call through" would also name `String::data`.
+    // `khora check`'s refusal, which comes before code generation.
     assert!(
-        found.iter().any(|m| m.contains("`#String::data` has no body, so there is nothing to call")),
+        found.iter().any(|m| m.contains("`String::data` has no body, so there is nothing to call")),
         "expected `String::data` to be refused as a declaration with no body, got {found:?}"
     );
 }

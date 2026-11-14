@@ -194,8 +194,9 @@ tar xzf "khora-$version-$triple.tar.gz" -C /opt
 
 Windows ships the same layout as a `.zip` rather than a `.tar.gz`.
 The archive unpacks to `khora-<version>-<triple>/` holding `bin/khora`, the
-runtime archive beside it, `std/` as source, and the licenses. Every Linux
-archive, glibc or musl, also holds `targets/`, with the runtime and musl C library for each
+runtime archive beside it, `std/` as source, the licenses, and `targets/`.
+`targets/` holds the [WebAssembly](#webassembly) runtime in every archive, and
+in every Linux archive, glibc or musl, the runtime and musl C library for each
 [static target](#static-executables-musl). Nothing needs
 configuring after unpacking: the compiler finds `std/` and the runtime beside
 its own binary, and `KHORA_STD` and `KHORA_RT_LIB` exist only as overrides for
@@ -208,7 +209,7 @@ materials for the toolchain itself, with its own checksum.
 
 WebAssembly is a distinct runtime environment, not Linux with a different object format. A wasm target must use a std/platform surface appropriate to its host and must not expose filesystem or socket APIs the host does not provide.
 
-**No wasm target is advertised.** What exists is a WebAssembly *library*: `khora build --lib` with `KHORA_TARGET=wasm32-unknown-unknown` produces a module that exports your `pub extern fn`s and imports nothing. **It needs a runtime archive that release archives do not include**: build one from a source checkout of the same version with `cargo build -p khora-rt --target wasm32-unknown-unknown` and point [`KHORA_RT_LIB`](/docs/reference/environment/#khora_rt_lib) at the `libkhora_rt.a` it writes under `wasm32-unknown-unknown/debug/` in the cargo target directory. Without it the build fails at the link. Inside the module, arrays, strings, loops, `!`, and regions with their finalizers work as they do natively, and the compiler's own tests run such modules and check what they return. It has one thread of control: nothing can be canceled from inside the module, a long loop runs until the host stops it, and `Fiber::spawn` is not available. **`print` and the text of a trap go nowhere** — the module has no standard output or error, and imports nothing that could carry them — so return what the host needs to see. **After a trap, discard the instance** and make a new one rather than calling it again: the trapped call's objects are never freed and its finalizers never run, so the instance that survives it is not in a state anything promises.
+**No wasm target is advertised.** What exists is a WebAssembly *library*: `khora build --lib --target wasm32-unknown-unknown` produces a module that exports your `pub extern fn`s and imports nothing. Every release archive carries the runtime it links, in `targets/wasm32-unknown-unknown/`, and the compiler finds it there. The link is done by `wasm-ld`, which the compiler looks for in the LLVM installation it was built against and then on `PATH`; it comes with LLVM's `lld` (Homebrew's `lld@22` on macOS), and one on `PATH` must be LLVM 22's. Without it the build fails, naming both places it looked. Inside the module, arrays, strings, loops, `!`, and regions with their finalizers work as they do natively, and the compiler's own tests run such modules and check what they return. It has one thread of control: nothing can be canceled from inside the module, a long loop runs until the host stops it, and `Fiber::spawn` is not available. **`print` and the text of a trap go nowhere** — the module has no standard output or error, and imports nothing that could carry them — so return what the host needs to see. **After a trap, discard the instance** and make a new one rather than calling it again: the trapped call's objects are never freed and its finalizers never run, so the instance that survives it is not in a state anything promises.
 
 What is missing is everything a deployment needs. `std` has no Worker-shaped platform surface, and no host-provided networking or storage capabilities are modeled. That is the difference between a module that runs and a deployment path, and only the first exists.
 

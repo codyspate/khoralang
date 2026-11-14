@@ -16,6 +16,18 @@ pub(super) fn pattern(p: &mut Parser<'_>) {
             p.bump_any();
             m.complete(p, LITERAL_PAT);
         }
+        // **A negative integer is a literal pattern**, `-` and its digits in
+        // one node. Without it `-128 =>` was "expected a pattern", and the
+        // smallest value of every signed type could only be matched by a
+        // guard. Integers only: no other literal has a sign worth matching on
+        // (a `-0.0` pattern would read as a promise about the sign of zero
+        // that `==` does not keep).
+        MINUS if p.nth_at(1, INT_LIT) => {
+            let m = p.start();
+            p.bump(MINUS);
+            p.bump(INT_LIT);
+            m.complete(p, LITERAL_PAT);
+        }
         L_PAREN => tuple_pattern(p),
         IDENT => path_like_pattern(p),
         _ => p.err_recover("expected a pattern", |p| {

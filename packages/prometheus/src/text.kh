@@ -88,7 +88,10 @@ pub fn number(value: Float) -> String {
     "-Inf"
   } else if value == value {
     let shortest = Float::to_string(value);
-    if shortest == "?" {
+    // An exponent form goes through `with_exponent`, so the output is the
+    // same however std writes it: `1e+300`, as Python's `repr` and Go's
+    // `strconv` do (std writes `1e300`, which Prometheus reads the same).
+    if shortest == "?" || String::contains(shortest, "e") {
       if value < zero { "-${with_exponent(zero - value)}" } else { with_exponent(value) }
     } else {
       shortest

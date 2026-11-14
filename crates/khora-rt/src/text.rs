@@ -237,16 +237,23 @@ pub unsafe extern "C" fn khora_hash_bytes(data: *const u8, len: i64) -> i64 {
 
 /// Writes `value` into `into` as text, and says how many bytes that took.
 ///
-/// The shortest form that reads back as the same number, which is Rust's
-/// `{}` and is what a reader means by "the number". Khora cannot produce it
-/// itself: shortest-round-trip formatting is Ryū or Grisu, a table and a
-/// thousand lines, and it is exactly the kind of thing
-/// `docs/design/ecosystem.md` says to bind rather than write twice.
+/// The shortest digits that read back as the same number, which is what a
+/// reader means by "the number". Khora cannot produce them itself:
+/// shortest-round-trip formatting is Ryū or Grisu, a table and a thousand
+/// lines, and it is exactly the kind of thing `docs/design/ecosystem.md` says
+/// to bind rather than write twice.
+///
+/// **Plain from `1e-6` up to below `1e21`, with an exponent outside**:
+/// `0.000001`, `123456789012345680000`, then `1e-7`, `1e21`, `5e-324`. It is
+/// JavaScript's `Number.prototype.toString` rule. Rust's `{}`, which this was,
+/// never writes an exponent, so `1e300` came out as 301 digits and `5e-324`
+/// as 327 characters, and `Float::to_string`, which allows 32 bytes, answered
+/// `"?"` for them. The longest text is 25 bytes, a 17-digit value just above
+/// `1e-6` such as `-0.0000010000000000000002`. The exponent is written as `e300` and
+/// `e-7`, with no `+`, which `Float::of_string` and JSON both read.
 ///
 /// Returns the length needed when `capacity` is too small and writes nothing,
-/// so a caller can size a buffer in two calls rather than guessing. 32 bytes
-/// is always enough for an `f64`, which is why nobody will make the second
-/// call.
+/// so a caller can size a buffer in two calls rather than guessing.
 ///
 /// # Safety
 ///
@@ -255,7 +262,12 @@ pub unsafe extern "C" fn khora_hash_bytes(data: *const u8, len: i64) -> i64 {
 #[unsafe(no_mangle)]
 // SHARE: writes bytes into a buffer; takes no Khora object.
 pub unsafe extern "C" fn khora_float_text(value: f64, into: *mut u8, capacity: i64) -> i64 {
-    let text = format!("{value}");
+    let magnitude = value.abs();
+    let text = if magnitude != 0.0 && magnitude.is_finite() && !(1e-6..1e21).contains(&magnitude) {
+        format!("{value:e}")
+    } else {
+        format!("{value}")
+    };
     let bytes = text.as_bytes();
     if capacity < bytes.len() as i64 || into.is_null() {
         return bytes.len() as i64;
@@ -263,6 +275,79 @@ pub unsafe extern "C" fn khora_float_text(value: f64, into: *mut u8, capacity: i
     // SAFETY: the contract above, and the length was just checked against it.
     unsafe { into.copy_from_nonoverlapping(bytes.as_ptr(), bytes.len()) };
     bytes.len() as i64
+}
+
+/// The double nearest the number `text` spells, or `NaN` if it does not spell
+/// one in `Float::of_string`'s grammar.
+///
+/// **Bound for the reason `khora_float_text` is: correctly rounded reading is
+/// Eisel-Lemire with a big-number fallback, not a loop.** `Float::of_string`
+/// was that loop -- digits accumulated in doubles, scaled by a power of ten
+/// built the same way, a rounding at every step -- and it read about four
+/// doubles in five one unit in the last place off (`1.118` as
+/// `1.1179999999999999`), and `5e-324` as zero. Rust's `str::parse::<f64>`
+/// is correctly rounded, as Go's, JavaScript's and Python's readers are.
+///
+/// **The grammar is checked here first, because Rust's parser accepts more**:
+/// `inf`, `infinity` and `nan` in any case, a leading `+`, `1.`, `.5`. Each of
+/// those is a number nobody meant arriving from a configuration file, and
+/// `Float::of_string` refuses them. What passes is JSON's shape, plus the
+/// leading zeros `of_string` has always taken: an optional `-`, digits, an
+/// optional `.` and digits, an optional `e` or `E` with an optional sign and
+/// digits, and nothing else.
+///
+/// `NaN` is the refusal because no accepted text can produce it: the grammar
+/// has no name for it, and a parse of digits gives a finite number, zero or
+/// an infinity. A second return channel would cost the Khora side a buffer.
+///
+/// # Safety
+///
+/// `text` must address `len` readable bytes, or be null with a zero `len`.
+#[unsafe(no_mangle)]
+// SHARE: reads bytes from a buffer; takes no Khora object.
+pub unsafe extern "C" fn khora_float_parse(text: *const u8, len: i64) -> f64 {
+    if text.is_null() || len <= 0 {
+        return f64::NAN;
+    }
+    // SAFETY: the caller's contract, above, and `len` was just checked positive.
+    let bytes = unsafe { std::slice::from_raw_parts(text, len as usize) };
+    if !is_number_shape(bytes) {
+        return f64::NAN;
+    }
+    // The shape is ASCII, so the bytes are UTF-8 and the parse sees what was
+    // checked; neither fallback can be reached.
+    std::str::from_utf8(bytes).ok().and_then(|text| text.parse().ok()).unwrap_or(f64::NAN)
+}
+
+/// Whether `bytes` is a number `Float::of_string` accepts. See
+/// [`khora_float_parse`] for the grammar and why it is narrower than Rust's.
+fn is_number_shape(bytes: &[u8]) -> bool {
+    let digits_from = |at: usize| at + bytes[at..].iter().take_while(|b| b.is_ascii_digit()).count();
+    let mut at = usize::from(bytes.first() == Some(&b'-'));
+    let whole = digits_from(at);
+    if whole == at {
+        return false;
+    }
+    at = whole;
+    if bytes.get(at) == Some(&b'.') {
+        let fraction = digits_from(at + 1);
+        if fraction == at + 1 {
+            return false;
+        }
+        at = fraction;
+    }
+    if matches!(bytes.get(at), Some(b'e' | b'E')) {
+        at += 1;
+        if matches!(bytes.get(at), Some(b'+' | b'-')) {
+            at += 1;
+        }
+        let exponent = digits_from(at);
+        if exponent == at {
+            return false;
+        }
+        at = exponent;
+    }
+    at == bytes.len()
 }
 
 /// The number to exactly `places` decimal places.
@@ -421,5 +506,192 @@ mod tests {
         let needed = unsafe { khora_html_escape(text.as_ptr(), 3, out.as_mut_ptr(), 5) };
         assert_eq!(needed, 6);
         assert_eq!(&out, b"?????");
+    }
+
+    fn float_text(value: f64) -> String {
+        let mut out = [0u8; 64];
+        // SAFETY: `out` is 64 writable bytes, and its length is what is passed.
+        let wrote = unsafe { khora_float_text(value, out.as_mut_ptr(), out.len() as i64) };
+        assert!(wrote <= 32, "{value:e} took {wrote} bytes, past `Float::to_string`'s 32");
+        String::from_utf8(out[..wrote as usize].to_vec()).expect("ASCII")
+    }
+
+    /// **Every double fits `Float::to_string`'s 32 bytes, as the shortest
+    /// text that reads back.** Rust's `{}` never writes an exponent, so `1e300`
+    /// was 301 digits and `5e-324` 327 characters, and `to_string` answered
+    /// `"?"` for both. The cut is JavaScript's `Number.prototype.toString`'s:
+    /// plain from `1e-6` up to below `1e21`, an exponent outside.
+    #[test]
+    fn a_double_is_written_plain_inside_the_ordinary_range_and_with_an_exponent_outside() {
+        for (value, text) in [
+            (1e300, "1e300"),
+            (1.7976931348623157e308, "1.7976931348623157e308"),
+            (1e-300, "1e-300"),
+            (5e-324, "5e-324"),
+            (-5e-324, "-5e-324"),
+            (2.2250738585072014e-308, "2.2250738585072014e-308"),
+            (1e21, "1e21"),
+            (-1e21, "-1e21"),
+            (123456789012345680000.0, "123456789012345680000"),
+            (1e-7, "1e-7"),
+            (1.5e-7, "1.5e-7"),
+            (0.000001, "0.000001"),
+            (0.1, "0.1"),
+            (1.0, "1"),
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+            (f64::NAN, "NaN"),
+        ] {
+            assert_eq!(float_text(value), text, "{value:e}");
+        }
+    }
+
+    /// **Every finite double reads back to the same bits**, through Rust's
+    /// correctly rounded parse, which `Float::of_string` binds. 10,000 bit
+    /// patterns from a fixed seed, every exponent range in proportion to how
+    /// many doubles it holds.
+    #[test]
+    fn every_double_is_written_in_32_bytes_and_reads_back_exactly() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut checked = 0;
+        while checked < 10_000 {
+            // xorshift64*: fixed, so a red run names a value that stays red.
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let value = f64::from_bits(state.wrapping_mul(0x2545_f491_4f6c_dd1d));
+            if !value.is_finite() {
+                continue;
+            }
+            let text = float_text(value);
+            let back: f64 = text.parse().unwrap_or_else(|_| panic!("{text} does not parse"));
+            assert_eq!(back.to_bits(), value.to_bits(), "{value:e} was written {text}");
+            checked += 1;
+        }
+    }
+
+    /// **The longest text is 25 bytes, as documented**: a negative 17-digit
+    /// value just above `1e-6` is written plain, `-0.0000010000000000000002`.
+    /// The doc said 24 and named a value that is 24; nothing measured it.
+    #[test]
+    fn the_longest_text_is_the_one_the_doc_names() {
+        let longest = float_text(-1.0000000000000002e-6);
+        assert_eq!(longest, "-0.0000010000000000000002");
+        assert_eq!(longest.len(), 25);
+        assert_eq!(float_text(-2.2250738585072014e-308).len(), 24);
+    }
+
+    fn float_parse(text: &str) -> Option<f64> {
+        // SAFETY: `text` is `len` readable bytes for the length of the call.
+        let value = unsafe { khora_float_parse(text.as_ptr(), text.len() as i64) };
+        (!value.is_nan()).then_some(value)
+    }
+
+    /// **The grammar `Float::of_string` has always had, no wider**, now that
+    /// Rust's parser does the reading. Every row of "refused" is text Rust's
+    /// `str::parse::<f64>` takes, and that was refused before this bound it:
+    /// a configuration value that read `inf` or `+1` would otherwise become a
+    /// number nobody wrote.
+    #[test]
+    fn a_number_is_read_in_of_strings_grammar_and_no_other() {
+        let accepted: &[(&str, f64)] = &[
+            ("0", 0.0),
+            ("-0", -0.0),
+            ("007", 7.0),
+            ("1.5", 1.5),
+            ("-1.5", -1.5),
+            ("1e3", 1000.0),
+            ("1E3", 1000.0),
+            ("1e+3", 1000.0),
+            ("1e-3", 0.001),
+            ("1.25e2", 125.0),
+            ("1e400", f64::INFINITY),
+            ("-1e400", f64::NEG_INFINITY),
+            ("1e-400", 0.0),
+            ("1.118", 1.118),
+            ("5e-324", 5e-324),
+            ("1e00000000000000000000003", 1000.0),
+        ];
+        for &(text, want) in accepted {
+            let got = float_parse(text).unwrap_or_else(|| panic!("`{text}` was refused"));
+            assert_eq!(got.to_bits(), want.to_bits(), "`{text}` read as {got:e}");
+        }
+        let refused = [
+            "", "-", "+1", ".5", "1.", "-.5", "1.e3", "1e", "1e+", "1e-", "e3", "inf", "-inf", "Infinity",
+            "infinity", "INF", "nan", "NaN", "-nan", "1_0", "0x10", " 1", "1 ", "1.2.3", "1e3.5", "--1", "1-",
+            "١", "1e3e3",
+        ];
+        for text in refused {
+            assert_eq!(float_parse(text), None, "`{text}` was accepted");
+        }
+    }
+
+    /// `Float::of_string`'s grammar as its Khora scanner implemented it,
+    /// transcribed stage by stage: digits, an optional point and digits, an
+    /// optional `e`. Kept as the oracle the fuzz below holds the bound reader
+    /// to, so the two cannot drift apart by one of them being edited.
+    fn scanner_accepts(bytes: &[u8]) -> bool {
+        let digits = |from: usize| {
+            let mut at = from;
+            while at < bytes.len() && bytes[at].is_ascii_digit() {
+                at += 1;
+            }
+            at
+        };
+        if bytes.is_empty() {
+            return false;
+        }
+        let start = usize::from(bytes[0] == b'-');
+        let whole = digits(start);
+        if whole == start {
+            return false;
+        }
+        let mut at = whole;
+        if at < bytes.len() && bytes[at] == b'.' {
+            let fraction = digits(at + 1);
+            if fraction == at + 1 {
+                return false;
+            }
+            at = fraction;
+        }
+        if at >= bytes.len() {
+            return true;
+        }
+        if bytes[at] != b'e' && bytes[at] != b'E' {
+            return false;
+        }
+        let signed = at + 1;
+        let from = if signed < bytes.len() && (bytes[signed] == b'-' || bytes[signed] == b'+') { signed + 1 } else { signed };
+        let end = digits(from);
+        end == bytes.len() && end != from
+    }
+
+    /// **The bound reader refuses exactly what the scanner refused**, on
+    /// 200,000 random strings of up to eight characters from the alphabet
+    /// that matters: digits, `-`, `+`, `.`, `e`, `E`, `_`, `i`, `n`, `f`,
+    /// `a`, a space. A table names the cases somebody thought of; this finds
+    /// the ones nobody did.
+    #[test]
+    fn the_bound_reader_accepts_what_the_scanner_accepted_and_nothing_else() {
+        let alphabet = b"0123456789-+.eE_infa ";
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut agreed_accepting = 0;
+        for _ in 0..200_000 {
+            let length = (next() % 9) as usize;
+            let text: Vec<u8> = (0..length).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect();
+            let text = String::from_utf8(text).expect("ASCII");
+            let accepted = float_parse(&text).is_some();
+            assert_eq!(accepted, scanner_accepts(text.as_bytes()), "`{text}`: bound reader accepted = {accepted}");
+            agreed_accepting += usize::from(accepted);
+        }
+        assert!(agreed_accepting > 1_000, "only {agreed_accepting} accepted strings were tried");
     }
 }

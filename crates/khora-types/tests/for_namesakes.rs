@@ -122,6 +122,24 @@ fn an_own_map_with_no_imports() {
     )]);
 }
 
+/// **An own `Pair` taken apart by a record pattern**, the way a record type
+/// is matched by its own name. `std::core`'s `Pair<K, V>` is what a `Map`'s
+/// entries are, and its impls reached this file by name: the pattern was
+/// refused as "`Pair` takes 0 type argument(s), but 2 were given", pointing
+/// at the end of the file.
+#[test]
+fn an_own_pair_matched_by_a_record_pattern() {
+    assert_clean(&[(
+        "main.kh",
+        "module main;\nimport std::core::{print, Show, String, U8, I16};\n\
+         type Pair = { tag: U8, n: I16 };\n\
+         fn rec(p: Pair) -> String {\n  match p {\n    Pair { tag: 0xFE, n: 0x100 } => \"fe/100\",\n    \
+         Pair { tag: 0, n: _ } => \"0/_\",\n    _ => \"other\",\n  }\n}\n\
+         fn tag(p: Pair) -> U8 { let Pair { tag, n } = p; tag }\n\
+         pub fn main() -> Int { let p: Pair = { tag: 254, n: 256 }; print(rec(p)); 0 }\n",
+    )]);
+}
+
 /// An own `Dict` of `std`'s arity, matched, beside a `List` loop.
 #[test]
 fn an_own_dict_of_the_same_arity() {

@@ -579,6 +579,122 @@ fn every_signed_minimum_is_a_negated_literal() {
     );
 }
 
+/// **A repeated literal arm is unreachable on every integer type, not only
+/// `Int`.** A fixed-width scrutinee was given no column type at all, so
+/// coverage was never asked: `255 => .., 255 => ..` on a `U8` was accepted in
+/// silence. The same value in two spellings counts as the same arm.
+#[test]
+fn a_repeated_literal_arm_is_unreachable_on_every_integer_type() {
+    for (ty, first, second) in [
+        ("U8", "255", "0xFF"),
+        ("U8", "255", "255"),
+        ("U16", "0o777", "511"),
+        ("U32", "0xFFFF_FFFF", "4294967295"),
+        ("U64", "0x8000_0000_0000_0000", "9223372036854775808"),
+        ("I8", "0x7F", "127"),
+        ("I16", "-0x8000", "-32768"),
+        ("I32", "0b1", "1"),
+        ("I64", "-1", "-0x1"),
+    ] {
+        assert_reports(
+            &format!(
+                "module m;\nimport std::core::{{U8, U16, U32, U64, I8, I16, I32, I64}};\n\
+                 fn f(x: {ty}) -> Int {{ match x {{ {first} => 1, {second} => 2, _ => 3 }} }}\n"
+            ),
+            "unreachable",
+        );
+    }
+}
+
+/// **The same for a `Char` or a `Float`**, which had no column type either.
+#[test]
+fn a_repeated_char_or_float_arm_is_unreachable() {
+    assert_reports(
+        "module m;\nfn f(x: Char) -> Int { match x { 'a' => 1, 'a' => 2, _ => 3 } }\n",
+        "unreachable",
+    );
+    assert_reports(
+        "module m;\nfn f(x: Float) -> Int { match x { 1.5 => 1, 1.5 => 2, _ => 3 } }\n",
+        "unreachable",
+    );
+}
+
+/// **A `Float` arm is keyed by its value, not its spelling**: `1.50` repeats
+/// `1.5`, and `0.1000000000000000055511151231257827` is the double `0.1` is,
+/// so the second arm of each pair can never run. Keyed by the text, neither
+/// was reported. Different values stay different.
+#[test]
+fn a_float_arm_with_the_same_value_in_another_spelling_is_unreachable() {
+    for (first, second) in [("1.5", "1.50"), ("0.1", "0.1000000000000000055511151231257827"), ("2.0", "2.000")] {
+        assert_reports(
+            &format!("module m;\nfn f(x: Float) -> Int {{ match x {{ {first} => 1, {second} => 2, _ => 3 }} }}\n"),
+            "unreachable",
+        );
+    }
+    assert_clean("module m;\nfn f(x: Float) -> Int { match x { 0.1 => 1, 0.10000000000000002 => 2, _ => 3 } }\n");
+}
+
+/// **A literal `match` on a fixed-width, `Char` or `Float` value needs a
+/// catch-all.** With no column type the coverage check was skipped, so a
+/// `match` on a `U8` with only `0` and `1` built, and a `2` reached the end of
+/// the arms and stopped the program with an illegal instruction.
+#[test]
+fn literal_arms_alone_never_cover_a_fixed_width_value() {
+    for ty in ["U8", "I8", "U64", "Char", "Float"] {
+        let arms = match ty {
+            "Char" => "'a' => 1, 'b' => 2",
+            "Float" => "0.5 => 1, 1.5 => 2",
+            _ => "0 => 1, 1 => 2",
+        };
+        assert_reports(
+            &format!(
+                "module m;\nimport std::core::{{U8, I8, U64}};\n\
+                 fn f(x: {ty}) -> Int {{ match x {{ {arms} }} }}\n"
+            ),
+            "not exhaustive",
+        );
+    }
+    assert_clean(
+        "module m;\nimport std::core::{U8};\nfn f(x: U8) -> Int { match x { 0 => 1, 1 => 2, _ => 3 } }\n",
+    );
+}
+
+/// **A negative literal is a pattern**, for `Int` and every signed type, and
+/// it has to fit as a negated literal does in a `let`: `-128` on an `I8` is
+/// accepted and `-129` is refused; on an unsigned type any negative number is
+/// refused. `-0` is zero, which every type holds.
+#[test]
+fn a_negative_literal_is_a_pattern_and_has_to_fit() {
+    assert_clean(
+        "module m;\nimport std::core::{I8};\n\
+         fn f(x: I8) -> Int { match x { -128 => 1, -0x7F => 2, 0 => 3, _ => 4 } }\n",
+    );
+    assert_clean(
+        "module m;\nfn f(x: Int) -> Int { match x { -9223372036854775808 => 1, -1 => 2, _ => 3 } }\n",
+    );
+    assert_clean(
+        "module m;\nimport std::core::{U8};\nfn f(x: U8) -> Int { match x { -0 => 1, _ => 2 } }\n",
+    );
+    assert_reports(
+        "module m;\nimport std::core::{I8};\nfn f(x: I8) -> Int { match x { -129 => 1, _ => 2 } }\n",
+        "`-129` does not fit in `I8`, which holds -128 to 127",
+    );
+    assert_reports(
+        "module m;\nimport std::core::{U8};\nfn f(x: U8) -> Int { match x { -1 => 1, _ => 2 } }\n",
+        "`-1` does not fit in `U8`, which holds 0 to 255",
+    );
+    assert_reports(
+        "module m;\nfn f(x: Int) -> Int { match x { -9223372036854775809 => 1, _ => 2 } }\n",
+        "`-9223372036854775809` does not fit in an `Int`",
+    );
+    // Inside a case's payload, and the same number twice in two spellings.
+    assert_reports(
+        "module m;\nimport std::core::{I8};\npub type B = | Of(v: I8) | No;\n\
+         fn f(x: B) -> Int { match x { B::Of(-0x80) => 1, B::Of(-128) => 2, _ => 3 } }\n",
+        "unreachable",
+    );
+}
+
 // --- `Unknown` is a silence, not a type ------------------------------------
 
 /// A body the checker finished cleanly must have no `Unknown` left in it.

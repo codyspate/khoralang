@@ -81,7 +81,40 @@ pub fn separator_source() -> (&'static str, String) {
     panic!("no `std/separator_*.kh` is selected for `{}`", khora_db::host_target())
 }
 
-/// The `khora` executable cargo built beside this test binary.
+/// The cargo target directory this test's artifacts were built into: where
+/// `khora` and every `libkhora_rt.a` cargo wrote are.
+///
+/// **A stopgap, until cargo tells a test where its workspace's artifacts
+/// are.** This walked up from the test binary, assuming it sat in
+/// `<target>/<profile>/deps/`. A separate build directory moves test
+/// binaries and leaves artifacts where they were: with
+/// `build.build-dir = "b"`, the binary is in `b/debug/deps/` and
+/// `CARGO_TARGET_TMPDIR` is `b/tmp`, while `khora` is still in
+/// `<target>/debug/` (measured on 1.99). Rust 1.100 moves test binaries by
+/// default. So no single path is right in both, and this tries, in order:
+/// `CARGO_TARGET_DIR` as the run was given it, `CARGO_TARGET_TMPDIR`'s parent
+/// (the target directory when there is no separate build directory), and the
+/// workspace's own `target/`. The first that holds a `khora` or a
+/// `libkhora_rt.a` wins. It costs a wrong answer only when two of those each
+/// hold one and the first is stale, which a test cannot tell from here.
+#[allow(dead_code)]
+pub fn target_dir() -> Option<std::path::PathBuf> {
+    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let khora = format!("khora{}", std::env::consts::EXE_SUFFIX);
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let candidates = [
+        std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from),
+        Path::new(env!("CARGO_TARGET_TMPDIR")).parent().map(Path::to_path_buf),
+        Some(workspace.join("target")),
+    ];
+    let runtime = if cfg!(windows) { "khora_rt.lib" } else { "libkhora_rt.a" };
+    candidates.into_iter().flatten().find(|dir| {
+        let built = dir.join(profile);
+        built.join(&khora).is_file() || built.join(runtime).is_file()
+    })
+}
+
+/// The `khora` executable cargo built for this run.
 ///
 /// **What it prevents: a test that cannot find the compiler and passes.**
 /// The cross-process checks in `profiles` and `reproducible` asked for
@@ -89,10 +122,7 @@ pub fn separator_source() -> (&'static str, String) {
 /// owns the binary -- `khora-cli`, not this one. So all three returned early,
 /// counted as passed in a dozen milliseconds, in every run there had ever
 /// been. A missing binary is a failure here, naming the command that builds
-/// it.
-///
-/// Found as `khora-cli/tests/doc.rs` finds it: a test binary is
-/// `target/<profile>/deps/<name>`, and `khora` is `target/<profile>/khora`.
+/// it. Found through [`target_dir`].
 ///
 /// A workspace run builds it; `-p khora-codegen-llvm` alone does not, and
 /// then the binary is whatever the last build left. Nothing here can tell a
@@ -100,19 +130,15 @@ pub fn separator_source() -> (&'static str, String) {
 /// which other tests that hash it forbid.
 #[allow(dead_code)]
 pub fn khora() -> std::path::PathBuf {
-    let mut dir = std::env::current_exe().expect("the test binary");
-    dir.pop();
-    if dir.ends_with("deps") {
-        dir.pop();
-    }
-    let exe = dir.join(format!("khora{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        exe.is_file(),
-        "no `khora` at {}; build it with `cargo build -p khora-cli --features llvm` \
-         (the profile this test was built with) and run again",
-        exe.display()
-    );
-    exe
+    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let Some(target) = target_dir() else {
+        panic!(
+            "no `khora` in any target directory this test could find (`CARGO_TARGET_DIR`, \
+             `CARGO_TARGET_TMPDIR`'s parent, the workspace's `target/`); build it with \
+             `cargo build -p khora-cli --features llvm` and run again"
+        )
+    };
+    target.join(profile).join(format!("khora{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// Makes sure the runtime archive exists and is current.
@@ -154,6 +180,12 @@ pub fn khora() -> std::path::PathBuf {
 pub fn ensure_runtime() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
+        // The runtime archive is in the target directory, which the test
+        // binary is not beside under a separate build directory; see
+        // `set_test_target_dir` for why this is not `KHORA_RT_LIB`.
+        if let Some(target) = target_dir() {
+            khora_codegen_llvm::toolchain::set_test_target_dir(target);
+        }
         if archive_is_current() {
             return;
         }

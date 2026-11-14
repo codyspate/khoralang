@@ -129,12 +129,13 @@ network = ["gateway"]
 listen = ["gateway"]
 fs = ["reports"]
 env = ["gateway", "reports"]
+process = ["reports"]
 extern = ["sqlite"]
 ```
 
 Only `gateway` may write a `[permissions] network` or `listen` entry; only
-`reports` may write `[permissions.fs]`. Neither is told anything about *which*
-host, port or path —
+`reports` may write `[permissions.fs]` or `[permissions] process`. Neither is told anything about *which*
+host, port, path or program —
 `network = ["*.internal:5432"]` here is not a narrower cap, it is a member name
 that does not exist, and the root is refused with `` `*.internal:5432` is not a
 member of the workspace ``. A typo in a cap is a cap that does not apply, so it
@@ -148,17 +149,10 @@ the message says where the cap is and what to do about it:
 reports. Add `cli` to `[workspace.policy] fs` if it should be, or drop the grant
 ```
 
-A category the policy does not mention is uncapped. This is the one place a
-workspace overrules a member rather than offering it something.
-
-**`process` is not one of the categories a policy caps.** The key parses, and a
-name in it that is not a member is refused like any other, so it reads as though
-it works. It does not: the check that refuses a member for granting a capped
-category runs over `network`, `listen`, `fs`, `env` and `extern`, and never over
-`process`. A root that writes
-`process = ["gateway"]` does not stop any other member writing
-`[permissions] process`. Leave it out rather than relying on it, and cap the
-grant in the member's own manifest.
+A category the policy does not mention is uncapped. Every list key of
+`[permissions]` can be capped: `network`, `listen`, `fs`, `env`, `process` and
+`extern`. This is the one place a workspace overrules a member rather than
+offering it something.
 
 Capping the *values* — "no member may reach anything outside `*.internal`" — is
 a different feature and is not here: it needs a rule for when one glob is

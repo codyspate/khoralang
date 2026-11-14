@@ -3683,12 +3683,20 @@ impl Float
 pub fn to_string(self) -> String
 ```
 
-The number, written out — `1.5`, `0.1`, `inf`.
+The number, written out — `1.5`, `0.1`, `1e300`, `inf`.
 
-The shortest form that reads back as the same number, which is what a
+The shortest digits that read back as the same number, which is what a
 reader means by "the number" and what `print` on a `Float` already gives.
-Thirty-two bytes is always enough for a double; the call says how many it
-needed, so a longer answer would be caught rather than truncated.
+**Plain from `0.000001` up to below `1e21`, and with an exponent outside
+that**: `1e21`, `1e-7`, `5e-324`, `-1.7976931348623157e308`. The rule is
+JavaScript's, and the exponent is written without a `+`, so every finite
+result is a JSON number. The longest is 25 bytes
+(`-0.0000010000000000000002`); thirty-two are
+allowed, and the call says how many it needed, so a longer answer would
+be caught rather than truncated.
+
+`Float::of_string` reads every finite result back as the same number,
+bit for bit, `-0` included.
 
 #### to_fixed
 
@@ -3768,9 +3776,17 @@ query and could not, and which found in the same hour that `Float` is the
 only primitive with no way in from text — `Int` and `Decimal` both have
 one.
 
-Inexact by construction, and that is the type rather than this function:
-`0.1` is not a binary fraction and never will be. `Decimal::of_string` is
-the one to reach for when the digits have to survive.
+**The double nearest the number written, always**: `"1.118"` is the
+double a compiler makes of the literal `1.118`, `"5e-324"` is the
+smallest one there is, and a number too large for a double is infinity.
+That is what Go's `strconv.ParseFloat`, JavaScript and Python give, and
+what a JSON reader has to give for a document to survive a round trip.
+The reading is done by the runtime, because a correct one is not a loop
+over digits.
+
+`0.1` is not one tenth: it is the double nearest one tenth, which is
+the type rather than this function. `Decimal::of_string` is the one to
+reach for when the digits have to survive.
 
 ### Int
 

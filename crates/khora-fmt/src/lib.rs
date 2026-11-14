@@ -431,9 +431,10 @@ impl Formatter {
         //
         // Only *after* the `-`. What comes before depends on where the minus
         // is: `n * -1` wants the space that the default gives it, and `(-1)`
-        // is already tight because the bracket rule ran first.
+        // is already tight because the bracket rule ran first. A negative
+        // literal pattern's `-` is part of its number, and hugs it the same.
         if prev == MINUS {
-            return prev_parent == PREFIX_EXPR;
+            return matches!(prev_parent, PREFIX_EXPR | LITERAL_PAT);
         }
         false
     }

@@ -221,11 +221,15 @@ ContextRow     ::= RecordExpr | Path ( RecordExpr )? ;  (* row, or a named
 
 Pattern        ::= "_"
                  | Literal
+                 | "-" IntLiteral                       (* negative integer   *)
                  | Ident                                (* binding            *)
                  | Path "(" ( Pattern ( "," Pattern )* )? ")"
                  | Path "{" ( RecordPatField ( "," RecordPatField )* )? "}"
                  | Path                                 (* nullary ctor       *)
                  | "(" ( Pattern ( "," Pattern )* )? ")" ;
+(* A literal pattern has to fit the type it is compared with, as it would in a
+   `let`: `-129` against an `I8`, or any negative number against an unsigned
+   type, is refused. Only an integer takes a sign in a pattern. *)
 RecordPatField ::= Ident ( ":" Pattern )? ;
 
 (* --- lexical ------------------------------------------------------------ *)

@@ -69,19 +69,16 @@ there are not many:
 | `network` | `std::net::HttpClient`; `std::net::socket::connect_to`/`connect_by` and `std::net::tls::connect`/`connect_by` check the same grant before dialing | **enforced** (outbound) |
 | `listen` | `std::net::socket::listen_on`, and every `Router::listen*` and `Router::bound` through it; checked against `0.0.0.0:<port>` before anything is bound. Entries are ports, ranges, `0` or `*`; an interface entry is refused at load, because std binds every interface | **enforced** (inbound) |
 | `env` | `std::env::Env` | **enforced** |
+| `process` | `std::process::Process`; matched by program name with `granted_name`, `*` spanning everything | **enforced** |
 | `extern` | — | **enforced**, at build time |
 
-**`process` and `clock` are not keys.** This table listed them for a long time
-and the manifest has never had them: writing `[permissions] process = [".."]`
-gets *unrecognized key `permissions.process`* and is otherwise ignored, which
-is the worst of both -- a reader believes a restriction is in place and
-nothing is. Named here as absent rather than quietly dropped, because the
-table having claimed them is the reason somebody would look.
-
-Whether they should exist is a separate question. `process` has an obvious
-shape, `granted_name` over command names. `clock` has none: a grant is a list
-of things, and there is nothing to list about knowing the time -- it would be
-a boolean, which is a different feature than the rest of this table.
+**`clock` is not a key.** This table listed it, and `process`, for a long
+time before the manifest had either. `process` has since become a key, with
+the shape this section expected, `granted_name` over command names, and a
+`[workspace.policy]` caps it as it caps the others. `clock` has none: a grant
+is a list of things, and there is nothing to list about knowing the time --
+it would be a boolean, which is a different feature than the rest of this
+table.
 
 **`fs` maps to two types, and the pair is the point.** `[permissions.fs]`
 already had `read` and `write` as separate grants, and a single `Fs`

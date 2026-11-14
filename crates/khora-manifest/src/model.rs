@@ -768,6 +768,17 @@ pub enum Category {
 }
 
 impl Category {
+    /// Every category, for a check that has to cover all of them.
+    ///
+    /// **What it prevents: a check that walks a list of its own and misses
+    /// one.** `[workspace.policy]` walked four and left `process` out, so a
+    /// policy capping `process` capped nobody. One list beside the enum is
+    /// the one place a new category has to be added; nothing makes the
+    /// compiler insist on it, so a variant added to the enum must be added
+    /// here too.
+    pub const ALL: [Category; 5] =
+        [Category::Fs, Category::Network, Category::Listen, Category::Env, Category::Process];
+
     /// The capability type this category governs.
     ///
     /// `Listen` shares `Net` with `Network`: there is one capability for the

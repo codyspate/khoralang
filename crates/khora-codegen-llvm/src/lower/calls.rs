@@ -207,9 +207,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         if let Some(shape) = int_owner(owner) {
             return Some(self.int_intrinsic(shape, owner, name, site, args, range));
         }
-        if owner == "Char" && matches!(name, "code" | "of" | "from_code") {
+        if owner == "Char" && khora_types::is_named_intrinsic(owner, name) {
             return Some(self.char_intrinsic(name, args, range));
         }
+        // `String`, `Ptr`, `Char` and `Float` are lowered by name, and the
+        // names are `khora_types::NAMED_INTRINSICS`, the table `khora check`
+        // reads: one this does not lower falls through to an ordinary call,
+        // and is refused there as a function with no body, as `check`
+        // refuses it.
         if owner == "String" && name == "with_data" {
             return Some(self.with_data(site, args, range));
         }
@@ -222,11 +227,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         if owner == "Float" && name == "to_int" {
             return Some(self.float_to_int(args, range));
         }
-        if owner == "String" && matches!(name, "bytes" | "byte" | "byte_length" | "slice" | "find")
-        {
+        if owner == "String" && khora_types::is_named_intrinsic(owner, name) {
             return Some(self.string_intrinsic(name, args, range));
         }
-        if owner == "Ptr" && matches!(name, "null" | "is_null") {
+        if owner == "Ptr" && khora_types::is_named_intrinsic(owner, name) {
             return Some(self.ptr_intrinsic(name, args, range));
         }
         None

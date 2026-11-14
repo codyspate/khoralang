@@ -112,7 +112,7 @@ fn server_program() -> String {
         "module demo::main;
 
 import std::clock::{{Clock}};
-import std::core::{{ChildFailed, Fiber, Nursery, Result, Scope, acquire, attempt, nursery, scoped}};
+import std::core::{{ChildFailed, Fiber, Nursery, Result, Scope, Shared, acquire, attempt, nursery, scoped}};
 import std::net::socket::{{accept_on, invalid_handle, listen_on, shut as shut_socket, start}};
 import std::net::tls::{{TlsConnection, TlsError, TlsServer, secure, server, shut}};
 
@@ -139,7 +139,7 @@ fn waiting() -> () raises Oops {{
 /// The `acquire` is the whole subject: the release is registered with the
 /// region, and the only way out of here is a cancellation, so a release that
 /// does not run on that path does not run at all.
-fn hold() -> () with {{ scope: Scope }} raises Oops {{
+fn hold(holding: Shared<Bool>) -> () with {{ scope: Scope }} raises Oops {{
   let settings = attempt(fn () => server(\"{certificate}\", \"{key}\")!);
   match settings {{
     Result::Err(_) => print(\"the certificate was refused, so this proves nothing\"),
@@ -160,6 +160,7 @@ fn hold() -> () with {{ scope: Scope }} raises Oops {{
               print(\"secured\");
               let held = acquire(connection, fn c => shut(c));
               print(\"holding\");
+              Shared::set(holding, true);
               waiting()!;
               print(\"the hold returned, which is wrong\")
             }},
@@ -172,27 +173,36 @@ fn hold() -> () with {{ scope: Scope }} raises Oops {{
 
 /// Fails, and is what cancels the holder.
 ///
-/// It waits first, and the wait is this test's reliability: the holder has to
-/// have finished its handshake and be inside the loop, and a loopback
-/// handshake is milliseconds against this.
-fn doomed() -> () raises Oops {{
-  with {{ clock: Clock::real() }} {{ clock.sleep(1500) }};
+/// **It waits until the holder says it holds the session**, and that wait is
+/// this test's reliability: the cancel has to find the holder inside its
+/// loop. A fixed 1.5 s, the first version, assumed the client had connected
+/// and finished its handshake by then; a client that started late found the
+/// nursery already closed and the test failed. Bounded, so a handshake that
+/// never completes still ends the run and fails by name below. The 200 ms
+/// after is margin for the holder to reach its loop's first check.
+fn doomed(holding: Shared<Bool>) -> () raises Oops {{
+  with {{ clock: Clock::real() }} {{
+    let mut waited = 0;
+    while !Shared::get(holding) && waited < 30000 {{ clock.sleep(10); waited = waited + 10 }};
+    clock.sleep(200)
+  }};
   raise Oops::Bad
 }}
 
 /// **Adoption order is load-bearing.** A nursery notices failures in the order
 /// it adopted, so with the holder first the doomed child is not looked at
 /// until the holder has finished, and nothing is ever canceled.
-fn both() -> () with {{ nursery: Nursery }} {{
-  nursery.spawn(fn () => doomed()!);
-  nursery.spawn(fn () => scoped(fn () => hold()!)!);
+fn both(holding: Shared<Bool>) -> () with {{ nursery: Nursery }} {{
+  nursery.spawn(fn () => doomed(holding)!);
+  nursery.spawn(fn () => scoped(fn () => hold(holding)!)!);
 }}
 
 pub fn main() -> Int {{
   // WSAStartup on Windows, and nothing anywhere else. Without it every socket
   // call fails and the program reports a port it could not bind.
   if start() {{}} else {{ print(\"no sockets\") }};
-  let _ = attempt(fn () => nursery(fn () => both())!);
+  let holding = Shared::of(false);
+  let _ = attempt(fn () => nursery(fn () => both(holding))!);
   print(\"the nursery closed\");
   // **Staying alive is what makes this test mean anything.** Written without
   // it, the program ends here, the operating system closes every socket it

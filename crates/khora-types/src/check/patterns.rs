@@ -607,7 +607,16 @@ impl<'a> Checker<'a> {
                         khora_syntax::number::int_literal_signed(n)
                             .map_or_else(|_| n.clone(), |value| value.to_string()),
                     ),
-                    Literal::Float(n) => Ctor::Literal(n.clone()),
+                    // By value too, as the shortest text of the double the
+                    // literal reads as (unique per double), so `1.5` and
+                    // `1.50` are one arm and the second is unreachable.
+                    // `-0.0` and `NaN` have no literal pattern, so one text
+                    // per value and `==` agree on every key here. A text Rust
+                    // cannot read (`1_000.0`) stays keyed by its spelling;
+                    // code generation refuses it.
+                    Literal::Float(n) => Ctor::Literal(
+                        n.parse::<f64>().map_or_else(|_| n.clone(), |value| format!("{value:?}")),
+                    ),
                     Literal::Str(s) => Ctor::Literal(format!("\"{s}\"")),
                     // Quoted the way it was written, so two arms matching the
                     // same character are the same constructor and two matching

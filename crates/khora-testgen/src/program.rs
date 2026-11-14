@@ -691,7 +691,11 @@ fn pattern(src: &mut Entropy<'_>) -> String {
         0 => "_".to_string(),
         1 => lower(&mut src).to_string(),
         // No `DECIMAL_LIT`: `1.5d` is a literal in every position but this one.
-        2 => format!("{}", src.choice(100)),
+        // A negative integer is, and is written tight: `-7`.
+        2 => match src.choice(200) {
+            n @ 0..100 => format!("{n}"),
+            n => format!("-{}", n - 100),
+        },
         3 => "\"text\"".to_string(),
         4 => ["true", "false", "'a'"][src.choice(3)].to_string(),
         5 => format!("{}::{}", upper(&mut src), upper(&mut src)),

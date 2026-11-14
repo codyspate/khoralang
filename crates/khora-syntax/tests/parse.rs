@@ -508,6 +508,25 @@ fn a_for_loop_takes_a_pattern() {
     assert!(out.debug_tree().contains("TUPLE_STRUCT_PAT"), "{}", out.debug_tree());
 }
 
+/// **A negative integer is a pattern**, the sign and the digits in one
+/// literal node, in every base and nested. A `-` before anything else is not
+/// a pattern: `-x`, `-1.5` and `-'a'` are refused.
+#[test]
+fn a_negative_integer_is_a_literal_pattern() {
+    let out = parse(
+        "module m;\nfn f(x: Int) -> Int { match x { -128 => 1, -0x80 => 2, -0b1 => 3, _ => 4 } }\n\
+         fn g(p: (Int, Int)) -> Int { match p { (-1, 0) => 1, _ => 2 } }\n",
+    );
+    assert!(out.errors().is_empty(), "{:?}", out.errors());
+    let dump = out.debug_tree();
+    assert!(dump.contains("LITERAL_PAT"), "{dump}");
+    assert!(!dump.contains("PREFIX_EXPR"), "a pattern's sign is not an expression\n{dump}");
+    for refused in ["-x", "-1.5", "-'a'", "- -1"] {
+        let out = parse(&format!("module m;\nfn f(x: Int) -> Int {{ match x {{ {refused} => 1, _ => 2 }} }}\n"));
+        assert!(!out.errors().is_empty(), "`{refused}` should not parse as a pattern");
+    }
+}
+
 /// The body's `{` must not be read as a record literal, the same hazard a
 /// `while` condition has.
 #[test]

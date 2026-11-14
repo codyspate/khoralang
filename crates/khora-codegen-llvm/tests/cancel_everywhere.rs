@@ -1883,20 +1883,28 @@ pub fn main() -> Int {
 /// reaches nothing in the program -- so the nursery's release reports it on
 /// standard error, once. The control is the same program with the child not
 /// failing: nothing on stderr.
+///
+/// **The body raises once the child says it is about to end**, not after a
+/// fixed 200 ms: a child scheduled late was canceled by the body's raise
+/// before it failed, and the one line never came (red with the child's
+/// first sleep at 400 ms). `Shared::set` and `raise` are not cancellation
+/// points, so a child that has set the flag ends the way `CHILD` says.
 #[test]
 fn a_nursery_child_failure_hidden_by_the_bodys_own_raise_is_reported_once() {
     const SOURCE: &str = "module main;
 import std::clock::{Clock};
-import std::core::{ChildFailed, Nursery, nursery, print};
+import std::core::{ChildFailed, Nursery, Shared, nursery, print};
 
 type Broken = | Boom;
 type Other = | Mine;
 
 pub fn main() -> Int {
   with { clock: Clock::real() } {
+    let ending = Shared::of(false);
     nursery(fn () => {
-      nursery.spawn(fn () => { clock.sleep(10); CHILD });
-      clock.sleep(200);
+      nursery.spawn(fn () => { clock.sleep(10); Shared::set(ending, true); CHILD });
+      let mut waited = 0;
+      while !Shared::get(ending) && waited < 30000 { clock.sleep(5); waited = waited + 5 };
       raise Other::Mine
     })! catch {
       ChildFailed { children } => print(\"child failed ${children}\"),
@@ -2445,6 +2453,14 @@ pub fn main() -> Int {
 /// half the sleep, so a loaded machine has 2.5 s of slack and a red run
 /// cannot pass. The reviewer's `p2_second_fail`, with 5000 for 500 and its
 /// comments left out.
+///
+/// **The body waits for job 1 to be unwinding before it spawns job 3**, read
+/// from a finalizer job 1's raise runs. A 10 ms sleep after job 1 *started*
+/// assumed it had also failed; a job 1 slow to fail was counted after job 3
+/// was spawned and `caught` read 1 (red with a spin before its raise). What
+/// is left between the finalizer and the failure being recorded is the
+/// fiber's own exit, with no Khora code in it, and the 100 ms after is margin
+/// for that; nothing a Khora program can read marks the moment.
 #[test]
 fn a_second_failure_stops_a_sibling_spawned_after_the_first() {
     const SOURCE: &str = "module main;
@@ -2457,16 +2473,23 @@ pub fn main() -> Int {
   with { clock: Clock::real() } {
     let job3_finished = Shared::of(0);
     let job3_finalized = Shared::of(0);
+    let job1_unwound = Shared::of(false);
     let mut caught = 0;
     let t0 = clock.monotonic_millis();
     bounded_nursery(2, fn () => {
-      let r1: Channel<Int> = Channel::bounded(1);
       nursery.spawn(fn () => {
-        Channel::send(r1, 1);
+        let reg = Region::open();
+        Region::defer(reg, fn () => Shared::set(job1_unwound, true));
         raise Broken::Boom
       });
-      let _ = Channel::receive(r1);
-      clock.sleep(10);
+      let mut waited = 0;
+      while !Shared::get(job1_unwound) && waited < 30000 { clock.sleep(1); waited = waited + 1 };
+      // Load-bearing, and the one fixed wait left: the finalizer runs before
+      // the nursery records job 1's failure, and there is no signal for the
+      // record itself. With 0 here the scheduler backend read `caught=1` in 5
+      // of 10 runs; 10 ms passed 10/10 here, and 100 is the margin for a
+      // loaded runner, paid once.
+      clock.sleep(100);
 
       let r3: Channel<Int> = Channel::bounded(1);
       nursery.spawn(fn () => {

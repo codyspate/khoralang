@@ -14,6 +14,8 @@
 #       std/                 the standard library, as source
 #       targets/<triple>/    Linux only: the runtime and musl C library for
 #                            each static musl target (see below)
+#       targets/wasm32-unknown-unknown/
+#                            every platform: the WebAssembly runtime
 #       licenses/            Linux only: what those carry
 #       LICENSE-MIT LICENSE-APACHE README
 #
@@ -132,6 +134,26 @@ case "$triple" in
         cp scripts/licenses/LLVM-LICENSE.TXT "$stage/licenses/LLVM-LICENSE.TXT"
         ;;
 esac
+
+# **The WebAssembly runtime, in every archive.** Without it a released
+# toolchain could not link `khora build --lib --target wasm32-unknown-unknown`
+# at all: the host's runtime beside `bin/` is refused as built for another
+# target, and the only way out was a source checkout of the same version and
+# `KHORA_RT_LIB`. It is the same bytes from any host, so every platform's
+# archive carries one, where `khora` already looks: `targets/<triple>/`. It
+# needs no sysroot, because a wasm module links nothing from a C library. The
+# linker, `wasm-ld`, is not in here: the compiler looks for it in the LLVM
+# prefix it was built with and then on PATH, as it does for `clang`. It costs
+# 10.6 MB unpacked and 3.5 MB of the compressed archive (a release build,
+# measured). 98% of that is Rust's own `compiler_builtins`, `std`, `core` and
+# `alloc` compiled for wasm; `wasm-ld` keeps only what a module calls.
+if command -v rustup > /dev/null 2>&1; then
+    rustup target add wasm32-unknown-unknown > /dev/null
+fi
+cargo build --release -p khora-rt --target wasm32-unknown-unknown
+mkdir -p "$stage/targets/wasm32-unknown-unknown"
+cp "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/libkhora_rt.a" \
+    "$stage/targets/wasm32-unknown-unknown/"
 
 # Written rather than copied: the repository's README is about building the
 # compiler, and somebody who has just unpacked one wants the other half.

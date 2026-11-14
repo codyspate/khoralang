@@ -238,6 +238,7 @@ fn a_child_canceled_mid_wait_still_finishes_and_is_reaped() {
 
 import std::clock::{{Clock}};
 import std::core::{{ChildFailed, Fiber, Nursery, Result, attempt, nursery}};
+import std::fs::{{FsRead}};
 import std::process::{{Process, ProcessError}};
 
 fn print(value: String);
@@ -261,14 +262,28 @@ fn slow() -> () raises Oops {{
 
 /// Fails, and is what cancels the sibling.
 ///
-/// **It waits first, and the wait is the whole reliability of this test.** The
-/// sibling has to be *inside* the blocking wait when the cancellation lands,
-/// and it can only get there after it has been spawned and has started its own
-/// child. Half a second against a child that runs for {SLEEP}s is a margin
-/// nothing here has to win a race for.
+/// **It waits for the slow child to have started, and that wait is the whole
+/// reliability of this test.** The sibling has to be *inside* the blocking
+/// wait when the cancellation lands. A fixed half second, the first version,
+/// was a race: a sibling scheduled late had not started its child when this
+/// failed, and the test failed on `started: false`. The file the child writes
+/// first is the proof it is running; the half second after it is then margin
+/// for the parent to reach the wait, against a child that runs for {SLEEP}s.
 fn doomed() -> () raises Oops {{
-  with {{ clock: Clock::real() }} {{ clock.sleep(500) }};
+  with {{ clock: Clock::real(), reads: FsRead::real() }} {{
+    let mut waited = 0;
+    while !started() && waited < 60000 {{ clock.sleep(10); waited = waited + 10 }};
+    clock.sleep(500)
+  }};
   raise Oops::Bad
+}}
+
+/// Whether the slow child has written its first file.
+fn started() -> Bool with {{ reads: FsRead }} {{
+  match attempt(fn () => reads.exists(\"{began}\")!) {{
+    Result::Ok(there) => there,
+    Result::Err(_) => false,
+  }}
 }}
 
 /// **Adoption order is load-bearing.** A nursery notices a child's failure in
@@ -287,7 +302,8 @@ pub fn main() -> Int {{
   0
 }}
 ",
-        command = slow_child(&started, &finished)
+        command = slow_child(&started, &finished),
+        began = started.display().to_string().replace('\\', "/")
     );
 
     let db = KhoraDatabase::new();

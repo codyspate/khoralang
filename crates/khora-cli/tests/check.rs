@@ -2008,6 +2008,68 @@ fn an_extern_fn_whose_signature_cannot_cross_is_refused_by_check() {
     }
 }
 
+/// **A bodiless method on `String`, `Ptr`, `Char` or `Float` is refused by
+/// `khora check`, with the build's message.** These owners have operations
+/// code generation lowers by name, and `check` left every bodiless method on
+/// them to the build, so `impl String { fn data(self) -> Ptr; }` called as
+/// `String::data(s)` or `s.data()` checked clean and failed to build. The
+/// names code generation does lower are pinned as unrefused in
+/// `khora-types`' `unimplemented` tests, which can declare them without std.
+#[test]
+fn a_bodiless_method_on_a_lowered_owner_is_refused_by_check() {
+    for (name, source, needle) in [
+        (
+            "bodiless_string_path",
+            "module m;\nimpl String {\n  fn data(self) -> Ptr;\n}\n\
+             pub fn main() -> Int { let p = String::data(\"hi\"); 0 }\n",
+            "`String::data` has no body, so there is nothing to call",
+        ),
+        (
+            "bodiless_string_method",
+            "module m;\nimpl String {\n  fn data(self) -> Ptr;\n}\n\
+             pub fn main() -> Int { let p = \"hi\".data(); 0 }\n",
+            "`String::data` has no body, so there is nothing to call",
+        ),
+        (
+            "bodiless_ptr",
+            "module m;\nimport std::core::{Ptr};\nimpl Ptr {\n  fn twice(self) -> Ptr;\n}\n\
+             pub fn main() -> Int { let p = Ptr::twice(Ptr::null()); 0 }\n",
+            "`Ptr::twice` has no body, so there is nothing to call",
+        ),
+        (
+            "bodiless_float",
+            "module m;\nimpl Float {\n  fn half(self) -> Float;\n}\n\
+             pub fn main() -> Int { let h = Float::half(1.0); 0 }\n",
+            "`Float::half` has no body, so there is nothing to call",
+        ),
+    ] {
+        let (ok, output) = check(name, source);
+        assert!(!ok, "{name}: checked clean, and the build refuses it:\n{output}");
+        assert!(output.contains(needle), "{name}:\n{output}");
+        let line = if name == "bodiless_ptr" { 6 } else { 5 };
+        assert!(output.contains(&format!("{name}.kh:{line}")), "{name}: at the call:\n{output}");
+        assert!(!output.contains("already has a method"), "{name}:\n{output}");
+    }
+}
+
+/// The same program through both commands: `check` and `build` refuse it
+/// with the same sentence, at the same call.
+#[cfg(feature = "llvm")]
+#[test]
+fn check_and_build_agree_on_a_bodiless_string_method() {
+    let source = "module m;\nimpl String {\n  fn data(self) -> Ptr;\n}\n\
+                  pub fn main() -> Int { let p = String::data(\"hi\"); 0 }\n";
+    let files = [("khora.toml", MANIFEST), ("src/main.kh", source)];
+    let sentence = "has no body, so there is nothing to call. Give it one, or write `extern fn` \
+                    if it is a C symbol to be found at link time";
+    for verb in ["check", "build"] {
+        let (ok, output) = command_on_package(&format!("bodiless_string_{verb}"), verb, &files);
+        assert!(!ok, "`khora {verb}` accepted it:\n{output}");
+        assert!(output.contains(&format!("`String::data` {sentence}")), "{verb}:\n{output}");
+        assert!(output.contains("main.kh:5"), "{verb}: at the call:\n{output}");
+    }
+}
+
 /// **A `pub extern fn` that defines a symbol `std` already names is refused
 /// where it is written.** The build refused it already, as "the program
 /// already has a symbol by that name", with no file and no line, after

@@ -75,6 +75,30 @@ fn a_category_the_policy_does_not_mention_is_uncapped() {
     Manifest::load(&worker).expect("`fs` is not capped here");
 }
 
+/// **Every category the per-package table has, the policy caps.** The
+/// policy table had a `process` key and the check walked four categories
+/// without it, so `process = []` in `[workspace.policy]` refused nobody: a
+/// member could grant itself any program while the root said no member may.
+#[test]
+fn the_policy_caps_every_category_a_member_can_grant() {
+    for (key, grant) in [
+        ("network", "\n[permissions]\nnetwork = [\"example.com\"]\n"),
+        ("listen", "\n[permissions]\nlisten = [\"8080\"]\n"),
+        ("env", "\n[permissions]\nenv = [\"HOME\"]\n"),
+        ("process", "\n[permissions]\nprocess = [\"git\"]\n"),
+        ("fs", "\n[permissions.fs]\nread = [\"./data/**\"]\n"),
+        ("extern", "\n[permissions]\nextern = [\"worker\"]\n"),
+    ] {
+        let root = workspace(&format!("every_{key}"), &format!("\n[workspace.policy]\n{key} = [\"gateway\"]\n"));
+        member(&root, "gateway", grant);
+        let worker = member(&root, "worker", grant);
+        let why = failure(&worker);
+        assert!(why.contains(&format!("`worker` is not allowed to grant `{key}`")), "{key}: {why}");
+        Manifest::load(&root.join("packages").join("gateway").join("khora.toml"))
+            .unwrap_or_else(|why| panic!("{key}: the listed member loads: {why}"));
+    }
+}
+
 #[test]
 fn an_empty_list_caps_everybody() {
     let root = workspace("nobody", "\n[workspace.policy]\nnetwork = []\n");

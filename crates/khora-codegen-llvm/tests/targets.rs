@@ -175,13 +175,11 @@ fn skip(why: &str) {
 /// a test that does that on a cold machine is a test nobody runs. Skipped with
 /// a message instead, except under CI -- [`must_not_skip`].
 ///
-/// Looked for in the target directory this test was built into, which is the
-/// one `cargo build -p khora-rt --target ...` beside it wrote to, wherever
-/// `CARGO_TARGET_DIR` put it.
+/// Looked for in the target directory this test's artifacts went to
+/// ([`harness::target_dir`]), which is where `cargo build -p khora-rt
+/// --target ...` beside it wrote, wherever `CARGO_TARGET_DIR` put it.
 fn wasm_runtime() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let target = target.parent()?;
-    let path = target.join("wasm32-unknown-unknown").join("debug").join("libkhora_rt.a");
+    let path = harness::target_dir()?.join("wasm32-unknown-unknown").join("debug").join("libkhora_rt.a");
     path.is_file().then_some(path)
 }
 
@@ -522,8 +520,7 @@ fn host_musl() -> String {
 /// is what `ci.yml` runs before these on both Linux runners.
 #[cfg(target_os = "linux")]
 fn musl_runtime_built(triple: &str) -> bool {
-    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let Some(target) = target.parent() else { return false };
+    let Some(target) = harness::target_dir() else { return false };
     target.join(triple).join("debug").join("libkhora_rt.a").is_file()
 }
 

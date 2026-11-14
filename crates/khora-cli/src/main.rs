@@ -2898,10 +2898,10 @@ fn is_grants_module(path: &Path) -> bool {
 /// program had asked for. `Permissions::grants` had the rule right the whole
 /// time and nothing outside a test called it. Roadmap 16.1.
 ///
-/// The patterns are written as Khora string literals with the quotes and
-/// backslashes escaped, because a Windows path in a manifest is full of both
-/// and a generated source file that does not parse is the worst of the
-/// failures available here -- it would blame `std`.
+/// The patterns are written as Khora string literals by [`khora_string_body`],
+/// because a Windows path in a manifest is full of quotes and backslashes and
+/// a generated source file that does not parse is the worst of the failures
+/// available here -- it would blame `std`.
 #[cfg(feature = "llvm")]
 fn granted_source(target: &Path) -> Option<String> {
     let manifest_path = nearest_manifest(target)?;
@@ -2952,6 +2952,13 @@ fn granted_source(target: &Path) -> Option<String> {
 /// spaces in front of it. Khora does not care, so it parsed and every test
 /// passed, and the file somebody opened to check their permissions was
 /// crooked. A list of lines cannot do that.
+///
+/// **Each list is built by one statement per entry, not by a nested
+/// expression.** It was one `List::Cons(.., List::Cons(..))` per category,
+/// nested once per entry, and the parser refuses anything nested more than
+/// 256 deep: a `network` list of 260 hosts made std's own file fail to parse.
+/// `out = List::Cons(.., out);` repeated is as deep at a thousand entries as
+/// at one, and builds the same list with the same allocations.
 #[cfg(feature = "llvm")]
 fn render_grants(
     read: &[String],
@@ -2981,20 +2988,39 @@ fn render_grants(
         out.push(String::new());
         out.push(format!("/// {doc}"));
         out.push(format!("pub fn {name}() -> List<String> {{"));
-        out.push(render_list(patterns));
+        out.push("  let mut out: List<String> = List::Nil;".to_string());
+        for pattern in patterns.iter().rev() {
+            out.push(format!("  out = List::Cons(\"{}\", out);", khora_string_body(pattern)));
+        }
+        out.push("  out".to_string());
         out.push("}".to_string());
     }
     out.push(String::new());
     out.join("\n")
 }
 
-/// A `List<String>` literal, innermost first.
+/// `text` as the inside of a Khora `"..."` literal that reads back as `text`.
+///
+/// **What this prevents: a manifest writing code into `std`.** The generated
+/// module is one of std's own files, so a grant pattern pasted in unescaped
+/// was source the std gate trusted: `${..}` was interpolated, a `"` ended the
+/// literal, and a `\` started an escape. Every character a string literal
+/// treats specially is escaped -- `\`, `"`, `$`, and the control characters,
+/// which a quoted literal cannot hold raw.
 #[cfg(feature = "llvm")]
-fn render_list(patterns: &[String]) -> String {
-    let mut out = String::from("  List::Nil");
-    for pattern in patterns.iter().rev() {
-        let escaped = pattern.replace('\\', "\\\\").replace('"', "\\\"");
-        out = format!("  List::Cons(\"{escaped}\",\n  {})", out.trim_start());
+fn khora_string_body(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '$' => out.push_str("\\$"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:X}}}", u32::from(c))),
+            c => out.push(c),
+        }
     }
     out
 }
